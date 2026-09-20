@@ -28,6 +28,11 @@ The recorded facts identifying a pulled Checkpoint: Model Source, requested revi
 revision, and each file's size and checksum.
 _Avoid_: metadata, lockfile, manifest
 
+**Published Checksum**:
+The checksum a Model Source publishes for one of a Checkpoint's files, together with the algorithm it
+is expressed in. Pull verifies each file against it and records it beside the local SHA-256.
+_Avoid_: etag, upstream hash, remote checksum
+
 **Parameter Manifest**:
 The expected parameter names and shapes a Backend derives from a Checkpoint's own configuration
 before loading any weights.
