@@ -10,6 +10,9 @@ serde_json = "1.0.151"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+mlx-rs = { version = "=0.32.0" }
+tokenizers = "0.23.2"
+half = "2.7.1"
 
 [dev-dependencies]
 parking_lot = "0.12.5"

@@ -41,6 +41,8 @@ pub enum Error {
     MissingCheckpoint { name: String },
     /// The input contract exists before native inference does.
     InferenceUnavailable,
+    /// Native inference failed after the call and Checkpoint were validated.
+    Inference { message: String },
     /// The Pull did not carry the number of bytes the Model Source announced.
     SizeMismatch {
         path: String,
@@ -192,6 +194,7 @@ impl fmt::Display for Error {
             Error::InferenceUnavailable => {
                 write!(f, "native inference is not available yet")
             }
+            Error::Inference { message } => write!(f, "native inference failed: {message}"),
             Error::SizeMismatch {
                 path,
                 expected,

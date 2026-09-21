@@ -9,6 +9,7 @@
 //! commands call.
 
 mod commands;
+mod laya;
 
 pub mod call;
 pub mod checkpoint;

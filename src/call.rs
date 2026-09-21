@@ -179,6 +179,16 @@ impl fmt::Display for QuestionType {
     }
 }
 
+impl QuestionType {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            QuestionType::Choice => 0,
+            QuestionType::Score => 1,
+            QuestionType::Noul => 2,
+        }
+    }
+}
+
 /// Criteria are either named Options or ordered Levels.
 #[derive(Debug)]
 pub enum Criteria {
