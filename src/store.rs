@@ -1,11 +1,12 @@
-//! The Model Store: the Checkpoints on disk, each held under the name it was pulled with.
+//! The Model Store: the Checkpoints on disk, each held under the full name of its Model Source.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::provenance::Provenance;
 
-/// The store root below `$XDG_DATA_HOME`; each Checkpoint lives at `<root>/<name>` (ADR-0006).
+/// The store root below `$XDG_DATA_HOME`; the Checkpoint of `owner/name` lives at
+/// `<root>/<owner>/<name>` (ADR-0011).
 const STORE_PATH: &str = "s1gate/models";
 /// The store root below `$HOME` when `XDG_DATA_HOME` says nothing.
 const HOME_STORE_PATH: &str = ".local/share/s1gate/models";
@@ -40,10 +41,10 @@ impl Store {
         &self.root
     }
 
-    /// Where the Checkpoint pulled under `name` lives.
+    /// Where the Checkpoint of the Model Source `name` lives.
     pub fn checkpoint_dir(&self, name: &str) -> Result<PathBuf> {
-        validate_name(name)?;
-        Ok(self.root.join(name))
+        let (owner, checkpoint) = segments(name)?;
+        Ok(self.root.join(owner).join(checkpoint))
     }
 
     /// The Provenance `name` records, or `None` when it holds no Checkpoint.
@@ -83,7 +84,7 @@ impl Store {
     }
 }
 
-/// `$XDG_DATA_HOME/s1gate/models`, defaulting to `~/.local/share/s1gate/models` (ADR-0006). A
+/// `$XDG_DATA_HOME/s1gate/models`, defaulting to `~/.local/share/s1gate/models` (ADR-0011). A
 /// relative `XDG_DATA_HOME` is not a valid path and is ignored, as the XDG Base Directory
 /// specification requires.
 pub fn store_root(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
@@ -96,17 +97,25 @@ pub fn store_root(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Result<P
     }
 }
 
-/// Reject a name that would not address exactly one Checkpoint directory.
-pub fn validate_name(name: &str) -> Result<()> {
-    let usable =
-        !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']);
-    if usable {
-        Ok(())
-    } else {
-        Err(Error::InvalidName {
-            name: name.to_string(),
-        })
+/// Split the full name of a Model Source, `owner/name`, into the two segments that address its
+/// Checkpoint directory below the store root.
+fn segments(name: &str) -> Result<(&str, &str)> {
+    if let Some((owner, checkpoint)) = name.split_once('/')
+        && !name.contains(['\\', '\0'])
+        && names_a_directory(owner)
+        && names_a_directory(checkpoint)
+        && !checkpoint.contains('/')
+    {
+        return Ok((owner, checkpoint));
     }
+    Err(Error::InvalidName {
+        name: name.to_string(),
+    })
+}
+
+/// Whether one segment names a directory below the store root rather than a level above it.
+fn names_a_directory(segment: &str) -> bool {
+    !segment.is_empty() && segment != "." && segment != ".."
 }
 
 #[cfg(test)]
@@ -143,22 +152,44 @@ mod tests {
     }
 
     #[test]
-    fn names_addressing_more_than_one_directory_are_rejected() {
-        for name in ["", ".", "..", "a/b", "../laya", "a\\b", "lay\0a"] {
+    fn a_name_that_is_not_one_model_source_is_rejected() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "laya",
+            "/laya",
+            "laya/",
+            "/",
+            "../laya",
+            "a/../b",
+            "convaiinnovations/..",
+            "a/b/c",
+            "a\\b/c",
+            "lay\0a/x",
+        ] {
             assert!(
-                matches!(validate_name(name), Err(Error::InvalidName { .. })),
+                matches!(
+                    Store::at("/store").checkpoint_dir(name),
+                    Err(Error::InvalidName { .. })
+                ),
                 "`{name}` should be rejected"
             );
         }
-        assert!(validate_name("laya").is_ok());
-        assert!(validate_name("laya-1c5edc1").is_ok());
+        assert_eq!(
+            Store::at("/store")
+                .checkpoint_dir("convaiinnovations/laya")
+                .unwrap(),
+            PathBuf::from("/store/convaiinnovations/laya"),
+            "a Model Source addresses its Checkpoint below the store root"
+        );
     }
 
     #[test]
     fn a_checkpoint_round_trips_through_the_store() {
         let root = temp_dir("round-trip");
         let store = Store::at(&root);
-        assert_eq!(store.provenance("laya").unwrap(), None);
+        assert_eq!(store.provenance("convaiinnovations/laya").unwrap(), None);
 
         let provenance = Provenance {
             source: "convaiinnovations/laya".to_string(),
@@ -171,16 +202,19 @@ mod tests {
                 published: None,
             }],
         };
-        store.record_provenance("laya", &provenance).unwrap();
-        assert_eq!(store.provenance("laya").unwrap(), Some(provenance));
+        store.record_provenance("convaiinnovations/laya", &provenance).unwrap();
         assert_eq!(
-            store.checkpoint_dir("laya").unwrap(),
-            root.join("laya"),
-            "the Checkpoint lives under the name it was pulled with"
+            store.provenance("convaiinnovations/laya").unwrap(),
+            Some(provenance)
+        );
+        assert_eq!(
+            store.checkpoint_dir("convaiinnovations/laya").unwrap(),
+            root.join("convaiinnovations").join("laya"),
+            "the Checkpoint lives under its Model Source"
         );
         assert!(
             !store
-                .checkpoint_dir("laya")
+                .checkpoint_dir("convaiinnovations/laya")
                 .unwrap()
                 .join("provenance.json.part")
                 .exists(),
@@ -194,13 +228,13 @@ mod tests {
     fn discarding_a_checkpoint_removes_its_files_and_record() {
         let root = temp_dir("discard");
         let store = Store::at(&root);
-        let directory = store.checkpoint_dir("laya").unwrap();
+        let directory = store.checkpoint_dir("convaiinnovations/laya").unwrap();
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("model.safetensors.part"), b"half").unwrap();
 
-        store.discard_checkpoint("laya").unwrap();
+        store.discard_checkpoint("convaiinnovations/laya").unwrap();
         assert!(!directory.exists(), "the name is free again");
-        store.discard_checkpoint("laya").unwrap();
+        store.discard_checkpoint("convaiinnovations/laya").unwrap();
 
         std::fs::remove_dir_all(&root).unwrap();
     }

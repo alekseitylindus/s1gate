@@ -5,7 +5,8 @@ use crate::error::{Error, Result};
 /// An upstream repository that publishes Checkpoints s1gate can execute.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ModelSource {
-    /// `<owner>/<name>` on the Model Source's host.
+    /// `<owner>/<name>` on the Model Source's host: the name the operator pulls by, and the name
+    /// the Checkpoint is stored under (ADR-0011).
     pub repo: &'static str,
     /// The Checkpoint allowlist in Pull order: paths relative to the repository root. Pull fails if
     /// the Model Source does not publish one of them.
@@ -59,6 +60,19 @@ mod tests {
                 "tokenizer/tokenizer_config.json",
             ]
         );
+    }
+
+    #[test]
+    fn every_curated_model_source_names_one_checkpoint_directory() {
+        for source in SOURCES {
+            assert!(
+                crate::store::Store::at("")
+                    .checkpoint_dir(source.repo)
+                    .is_ok(),
+                "`{}` is not a name the Model Store can hold a Checkpoint under",
+                source.repo
+            );
+        }
     }
 
     #[test]

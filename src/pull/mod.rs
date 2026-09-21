@@ -29,24 +29,21 @@ const CHUNK: usize = 64 * 1024;
 /// One Pull, as the caller asks for it.
 #[derive(Debug, Clone)]
 pub struct PullRequest {
-    /// The name the Checkpoint is stored under.
-    pub name: String,
-    /// The Model Source repository to pull from.
+    /// The Model Source to pull from. Its full name is the name the Checkpoint is stored under.
     pub source: String,
     /// The revision to pull, or `None` for the Model Source's default branch.
     pub revision: Option<String>,
-    /// Replace a Checkpoint already stored under this name.
+    /// Replace the Checkpoint already stored for this Model Source.
     pub force: bool,
 }
 
 /// What a Pull stored.
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    pub name: String,
     /// The Checkpoint directory.
     pub directory: PathBuf,
     pub provenance: Provenance,
-    /// The files this Pull streamed; empty when the name already held the resolved revision.
+    /// The files this Pull streamed; empty when the Checkpoint already held the resolved revision.
     pub pulled: Vec<String>,
 }
 
@@ -60,8 +57,8 @@ impl Outcome {
 /// Pull `request` from `hub` into `store`.
 pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> {
     let source = model_source::lookup(&request.source)?;
-    let directory = store.checkpoint_dir(&request.name)?;
-    let held = store.provenance(&request.name)?;
+    let directory = store.checkpoint_dir(source.repo)?;
+    let held = store.provenance(source.repo)?;
     let resolved = hub.resolve(source.repo, request.revision.as_deref())?;
 
     let reusing = match &held {
@@ -69,7 +66,7 @@ pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> 
         Some(held) => {
             if !request.force {
                 return Err(Error::RevisionHeld {
-                    name: request.name.clone(),
+                    name: source.repo.to_string(),
                     held: held.resolved_revision.clone(),
                     requested: resolved,
                 });
@@ -79,7 +76,7 @@ pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> 
         None => false,
     };
     if !reusing {
-        store.discard_checkpoint(&request.name)?;
+        store.discard_checkpoint(source.repo)?;
     }
     std::fs::create_dir_all(&directory).map_err(|error| Error::io("create", &directory, error))?;
 
@@ -104,9 +101,8 @@ pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> 
         resolved_revision: resolved,
         files,
     };
-    store.record_provenance(&request.name, &provenance)?;
+    store.record_provenance(source.repo, &provenance)?;
     Ok(Outcome {
-        name: request.name.clone(),
         directory,
         provenance,
         pulled,

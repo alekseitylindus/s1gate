@@ -13,22 +13,21 @@ const FIRST: &str = "1111111111111111111111111111111111111111";
 const SECOND: &str = "2222222222222222222222222222222222222222";
 
 #[test]
-fn pull_stores_exactly_the_allowlist_under_the_given_name() {
+fn pull_stores_exactly_the_allowlist_under_its_model_source() {
     let source = FakeSource::new(LAYA);
     source.publish(FIRST, published(FIRST));
     source.point("main", FIRST);
     let root = TempDir::new("allowlist");
     let store = Store::at(root.path());
 
-    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request("laya")).expect("pull");
+    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request()).expect("pull");
 
-    assert_eq!(outcome.name, "laya");
-    assert_eq!(outcome.directory, root.path().join("laya"));
+    assert_eq!(outcome.directory, root.path().join(LAYA));
     let mut expected: Vec<String> = ALLOWLIST.iter().map(|path| path.to_string()).collect();
     expected.push("provenance.json".to_string());
     expected.sort();
     assert_eq!(
-        support::tree(&root.path().join("laya")),
+        support::tree(&root.path().join(LAYA)),
         expected,
         "only the allowlist is stored"
     );
@@ -37,7 +36,7 @@ fn pull_stores_exactly_the_allowlist_under_the_given_name() {
         if !ALLOWLIST.contains(&path.as_str()) {
             continue;
         }
-        let stored = std::fs::read(root.path().join("laya").join(&path)).expect("stored file");
+        let stored = std::fs::read(root.path().join(LAYA).join(&path)).expect("stored file");
         assert_eq!(stored, body, "{path} holds the published bytes");
     }
 
@@ -61,7 +60,7 @@ fn pull_records_provenance_for_every_stored_file() {
     let root = TempDir::new("provenance");
     let store = Store::at(root.path());
 
-    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request("laya")).expect("pull");
+    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request()).expect("pull");
     let provenance = &outcome.provenance;
 
     assert_eq!(provenance.source, LAYA);
@@ -107,7 +106,7 @@ fn pull_records_provenance_for_every_stored_file() {
     );
 
     let recorded: s1gate::provenance::Provenance = serde_json::from_str(
-        &std::fs::read_to_string(root.path().join("laya").join("provenance.json"))
+        &std::fs::read_to_string(root.path().join(LAYA).join("provenance.json"))
             .expect("a record on disk"),
     )
     .expect("the record is readable JSON");
@@ -125,11 +124,11 @@ fn pull_resolves_the_default_branch_or_the_requested_revision() {
     let store = Store::at(root.path());
     let hub = Hub::at(source.base_url());
 
-    let default = pull::pull(&store, &hub, &request("laya")).expect("pull");
+    let default = pull::pull(&store, &hub, &request()).expect("pull");
     assert_eq!(default.provenance.resolved_revision, FIRST);
     assert_eq!(default.provenance.requested_revision, None);
     assert_eq!(
-        stored(&root, "laya", "rl_agent_config.json"),
+        stored(&root, "rl_agent_config.json"),
         source.bodies(FIRST)["rl_agent_config.json"],
         "the default branch's bytes are stored"
     );
@@ -140,7 +139,7 @@ fn pull_resolves_the_default_branch_or_the_requested_revision() {
         &PullRequest {
             revision: Some("next".to_string()),
             force: true,
-            ..request("laya")
+            ..request()
         },
     )
     .expect("pull of a named revision");
@@ -151,7 +150,7 @@ fn pull_resolves_the_default_branch_or_the_requested_revision() {
         "the requested ref is recorded beside the commit it resolved to"
     );
     assert_eq!(
-        stored(&root, "laya", "rl_agent_config.json"),
+        stored(&root, "rl_agent_config.json"),
         source.bodies(SECOND)["rl_agent_config.json"]
     );
 }
@@ -168,7 +167,7 @@ fn pull_rejects_a_revision_the_model_source_does_not_have() {
         &Hub::at(source.base_url()),
         &PullRequest {
             revision: Some("no-such-branch".to_string()),
-            ..request("laya")
+            ..request()
         },
     )
     .expect_err("an unknown revision fails the pull");
@@ -179,7 +178,7 @@ fn pull_rejects_a_revision_the_model_source_does_not_have() {
         "convaiinnovations/laya has no revision `no-such-branch`"
     );
     assert!(
-        !root.path().join("laya").exists(),
+        !root.path().join(LAYA).exists(),
         "nothing is stored for a revision that does not exist"
     );
 }
@@ -196,7 +195,7 @@ fn pull_fails_when_the_model_source_does_not_publish_an_allowlisted_file() {
     let root = TempDir::new("missing-file");
     let store = Store::at(root.path());
 
-    let error = pull::pull(&store, &Hub::at(source.base_url()), &request("laya"))
+    let error = pull::pull(&store, &Hub::at(source.base_url()), &request())
         .expect_err("an unpublished allowlist file fails the pull");
 
     assert!(matches!(error, s1gate::Error::MissingFile { .. }));
@@ -205,7 +204,7 @@ fn pull_fails_when_the_model_source_does_not_publish_an_allowlisted_file() {
         "convaiinnovations/laya does not publish `encoder/config.json`"
     );
     assert_eq!(
-        store.provenance("laya").expect("the store is readable"),
+        store.provenance(LAYA).expect("the store is readable"),
         None,
         "an incomplete Checkpoint is never recorded"
     );
@@ -228,9 +227,9 @@ fn an_interrupted_pull_leaves_a_partial_file_the_next_pull_streams_again() {
     let root = TempDir::new("interrupted");
     let store = Store::at(root.path());
     let hub = Hub::at(source.base_url());
-    let checkpoint = root.path().join("laya");
+    let checkpoint = root.path().join(LAYA);
 
-    pull::pull(&store, &hub, &request("laya")).expect_err("a truncated Pull fails");
+    pull::pull(&store, &hub, &request()).expect_err("a truncated Pull fails");
 
     assert!(
         checkpoint.join("model.safetensors.part").exists(),
@@ -238,20 +237,20 @@ fn an_interrupted_pull_leaves_a_partial_file_the_next_pull_streams_again() {
     );
     assert!(!checkpoint.join("model.safetensors").exists());
     assert_eq!(
-        store.provenance("laya").expect("the store is readable"),
+        store.provenance(LAYA).expect("the store is readable"),
         None
     );
 
     let attempts = source.file_requests().len();
     source.publish(FIRST, published(FIRST));
-    let outcome = pull::pull(&store, &hub, &request("laya")).expect("the retry succeeds");
+    let outcome = pull::pull(&store, &hub, &request()).expect("the retry succeeds");
 
     assert!(
         !checkpoint.join("model.safetensors.part").exists(),
         "the retry leaves no partial file behind"
     );
     assert_eq!(
-        stored(&root, "laya", "model.safetensors"),
+        stored(&root, "model.safetensors"),
         source.bodies(FIRST)["model.safetensors"],
         "the retry stored the whole file"
     );
@@ -281,7 +280,7 @@ fn pull_rejects_a_file_whose_bytes_do_not_match_the_published_checksum() {
     let root = TempDir::new("checksum");
     let store = Store::at(root.path());
     let hub = Hub::at(source.base_url());
-    let checkpoint = root.path().join("laya");
+    let checkpoint = root.path().join(LAYA);
     source.point("main", FIRST);
 
     // An LFS file, published as a sha256 the bytes do not match.
@@ -289,7 +288,7 @@ fn pull_rejects_a_file_whose_bytes_do_not_match_the_published_checksum() {
         FIRST,
         corrupting(published(FIRST), "model.safetensors", &"0".repeat(64)),
     );
-    let error = pull::pull(&store, &hub, &request("laya")).expect_err("a corrupt LFS file fails");
+    let error = pull::pull(&store, &hub, &request()).expect_err("a corrupt LFS file fails");
     assert!(matches!(error, s1gate::Error::ChecksumMismatch { .. }));
     assert!(
         error
@@ -310,7 +309,7 @@ fn pull_rejects_a_file_whose_bytes_do_not_match_the_published_checksum() {
         ),
     );
     let error =
-        pull::pull(&store, &hub, &request("laya")).expect_err("a corrupt config file fails");
+        pull::pull(&store, &hub, &request()).expect_err("a corrupt config file fails");
     assert!(matches!(error, s1gate::Error::ChecksumMismatch { .. }));
     assert!(
         error
@@ -339,7 +338,7 @@ fn pull_rejects_a_file_served_from_another_commit() {
     let root = TempDir::new("mixed-commits");
     let store = Store::at(root.path());
 
-    let error = pull::pull(&store, &Hub::at(source.base_url()), &request("laya"))
+    let error = pull::pull(&store, &Hub::at(source.base_url()), &request())
         .expect_err("a file from another commit fails the pull");
 
     assert!(matches!(error, s1gate::Error::UnexpectedCommit { .. }));
@@ -360,9 +359,9 @@ fn a_repeated_pull_of_the_same_revision_streams_nothing() {
     let store = Store::at(root.path());
     let hub = Hub::at(source.base_url());
 
-    let first = pull::pull(&store, &hub, &request("laya")).expect("pull");
+    let first = pull::pull(&store, &hub, &request()).expect("pull");
     let before = source.requests().len();
-    let again = pull::pull(&store, &hub, &request("laya")).expect("pull again");
+    let again = pull::pull(&store, &hub, &request()).expect("pull again");
 
     assert!(again.unchanged(), "nothing was pulled: {:?}", again.pulled);
     assert_eq!(again.provenance, first.provenance);
@@ -374,7 +373,7 @@ fn a_repeated_pull_of_the_same_revision_streams_nothing() {
     );
     assert!(since[0].target.starts_with("/api/models/"));
     assert_eq!(
-        stored(&root, "laya", "model.safetensors"),
+        stored(&root, "model.safetensors"),
         source.bodies(FIRST)["model.safetensors"]
     );
 }
@@ -390,13 +389,13 @@ fn a_different_revision_under_the_same_name_needs_force() {
     let store = Store::at(root.path());
     let hub = Hub::at(source.base_url());
 
-    pull::pull(&store, &hub, &request("laya")).expect("pull");
+    pull::pull(&store, &hub, &request()).expect("pull");
     let refusal = pull::pull(
         &store,
         &hub,
         &PullRequest {
             revision: Some("next".to_string()),
-            ..request("laya")
+            ..request()
         },
     )
     .expect_err("another revision over the same name is refused");
@@ -404,11 +403,13 @@ fn a_different_revision_under_the_same_name_needs_force() {
     assert!(matches!(refusal, s1gate::Error::RevisionHeld { .. }));
     assert_eq!(
         refusal.to_string(),
-        format!("Checkpoint `laya` holds revision {FIRST}; pulling {SECOND} over it needs --force")
+        format!(
+            "Checkpoint `{LAYA}` holds revision {FIRST}; pulling {SECOND} over it needs --force"
+        )
     );
     assert_eq!(
         store
-            .provenance("laya")
+            .provenance(LAYA)
             .expect("the store is readable")
             .expect("still recorded")
             .resolved_revision,
@@ -416,7 +417,7 @@ fn a_different_revision_under_the_same_name_needs_force() {
         "the refused pull changed nothing"
     );
     assert_eq!(
-        stored(&root, "laya", "rl_agent_config.json"),
+        stored(&root, "rl_agent_config.json"),
         source.bodies(FIRST)["rl_agent_config.json"]
     );
 
@@ -426,7 +427,7 @@ fn a_different_revision_under_the_same_name_needs_force() {
         &PullRequest {
             revision: Some("next".to_string()),
             force: true,
-            ..request("laya")
+            ..request()
         },
     )
     .expect("--force replaces the Checkpoint");
@@ -437,7 +438,7 @@ fn a_different_revision_under_the_same_name_needs_force() {
         Some("next")
     );
     assert_eq!(
-        stored(&root, "laya", "rl_agent_config.json"),
+        stored(&root, "rl_agent_config.json"),
         source.bodies(SECOND)["rl_agent_config.json"],
         "the replaced Checkpoint holds the new revision's files"
     );
@@ -465,7 +466,7 @@ fn pull_records_no_published_checksum_when_the_model_source_publishes_none() {
     let root = TempDir::new("no-checksum");
     let store = Store::at(root.path());
 
-    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request("laya")).expect("pull");
+    let outcome = pull::pull(&store, &Hub::at(source.base_url()), &request()).expect("pull");
 
     let record = outcome
         .provenance
@@ -501,7 +502,7 @@ fn pull_verifies_a_file_the_model_source_serves_without_redirecting() {
     let root = TempDir::new("direct");
     let store = Store::at(root.path());
 
-    let error = pull::pull(&store, &Hub::at(source.base_url()), &request("laya"))
+    let error = pull::pull(&store, &Hub::at(source.base_url()), &request())
         .expect_err("the published checksum is checked however the file arrives");
 
     assert!(matches!(error, s1gate::Error::ChecksumMismatch { .. }));
@@ -523,13 +524,12 @@ fn corrupting(files: Vec<ServedFile>, path: &str, etag: &str) -> Vec<ServedFile>
         .collect()
 }
 
-fn stored(root: &TempDir, name: &str, path: &str) -> Vec<u8> {
-    std::fs::read(root.path().join(name).join(path)).unwrap_or_else(|_| panic!("{path} is stored"))
+fn stored(root: &TempDir, path: &str) -> Vec<u8> {
+    std::fs::read(root.path().join(LAYA).join(path)).unwrap_or_else(|_| panic!("{path} is stored"))
 }
 
-fn request(name: &str) -> PullRequest {
+fn request() -> PullRequest {
     PullRequest {
-        name: name.to_string(),
         source: LAYA.to_string(),
         revision: None,
         force: false,

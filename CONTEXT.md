@@ -20,7 +20,8 @@ the network.
 _Avoid_: download, fetch, install, sync
 
 **Model Store**:
-The on-disk collection of pulled Checkpoints, each held under the name it was pulled with.
+The on-disk collection of pulled Checkpoints, each held under the full name of the Model Source it
+came from.
 _Avoid_: cache, registry, models dir
 
 **Provenance**:

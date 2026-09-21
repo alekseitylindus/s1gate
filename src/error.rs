@@ -106,7 +106,7 @@ impl fmt::Display for Error {
             }
             Error::InvalidName { name } => write!(
                 f,
-                "invalid Checkpoint name `{name}`: it must be one directory name"
+                "invalid Checkpoint name `{name}`: it must be a Model Source, `<owner>/<name>`"
             ),
             Error::NoStoreRoot => write!(
                 f,

@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use crate::error::Result;
 use crate::model_source;
 use crate::pull::{self, Hub, PullRequest};
-use crate::store::{self, Store};
+use crate::store::Store;
 
 #[derive(Parser)]
 #[command(
@@ -21,17 +21,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Pull a Checkpoint into the Model Store; the only command that reaches the network
+    ///
+    /// Without a Model Source, lists the Model Sources s1gate can pull, each with the revision of
+    /// the Checkpoint the Model Store already holds for it.
     Pull {
-        /// The Model Source repository, e.g. convaiinnovations/laya
-        repo: String,
-        /// The name to store the Checkpoint under
-        #[arg(long, value_name = "NAME")]
-        name: String,
+        /// The Model Source to pull, e.g. convaiinnovations/laya
+        model: Option<String>,
         /// The revision to pull; the default branch when absent
-        #[arg(long, value_name = "REF")]
+        #[arg(long, value_name = "REF", requires = "model")]
         revision: Option<String>,
-        /// Replace the Checkpoint already stored under this name
-        #[arg(long)]
+        /// Replace the Checkpoint the Model Store already holds for this Model Source
+        #[arg(long, requires = "model")]
         force: bool,
     },
 }
@@ -40,29 +40,50 @@ enum Command {
 /// 0 success, 1 runtime error, 2 usage error.
 pub fn run() -> Result<()> {
     match Cli::parse().command {
+        // `--revision` and `--force` cannot arrive here: each requires a Model Source.
+        Command::Pull { model: None, .. } => list(),
         Command::Pull {
-            repo,
-            name,
+            model: Some(model),
             revision,
             force,
         } => {
+            // Checked before the environment is consulted, so an unsupported Model Source reads as
+            // the usage error it is rather than as a missing Model Store. Pull repeats the check
+            // for callers that build their own store.
+            let source = model_source::lookup(&model)?;
+            let store = Store::from_env()?;
             let request = PullRequest {
-                name,
-                source: repo,
+                source: source.repo.to_string(),
                 revision,
                 force,
             };
-            // Checked before the environment is consulted, so an unsupported Model Source or a name
-            // that is not one directory reads as the usage error it is rather than as a missing
-            // Model Store. Pull repeats both checks for callers that build their own store.
-            model_source::lookup(&request.source)?;
-            store::validate_name(&request.name)?;
-            let store = Store::from_env()?;
             let outcome = pull::pull(&store, &Hub::public(), &request)?;
             report(&outcome);
             Ok(())
         }
     }
+}
+
+/// List the Model Sources s1gate can pull, each with the revision of the Checkpoint the Model Store
+/// holds for it. Reaches no network: the curated Model Sources are a value, and the Model Store is
+/// on disk.
+fn list() -> Result<()> {
+    // A Model Store without a location holds no Checkpoint, which is no reason to say nothing about
+    // which Model Sources exist.
+    let store = Store::from_env().ok();
+    for source in model_source::SOURCES {
+        let held = match &store {
+            Some(store) => store
+                .provenance(source.repo)?
+                .map(|provenance| provenance.resolved_revision),
+            None => None,
+        };
+        match held {
+            Some(revision) => println!("{}  {revision}", source.repo),
+            None => println!("{}", source.repo),
+        }
+    }
+    Ok(())
 }
 
 fn report(outcome: &pull::Outcome) {
