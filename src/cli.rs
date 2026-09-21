@@ -1,10 +1,10 @@
 //! The command line: one subcommand per operation.
 
 use clap::{Parser, Subcommand};
-use std::io;
+use std::io::{self, Read};
 
 use crate::call::Call;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model_source;
 use crate::pull::{self, Hub, PullRequest};
 use crate::store::Store;
@@ -74,8 +74,8 @@ pub fn run() -> Result<()> {
 }
 
 fn infer(name: &str) -> Result<()> {
-    let mut stdin = io::stdin().lock();
-    let _call = Call::read(&mut stdin)?;
+    // Judging the call is a Backend's job; this command owns the input and error contract alone.
+    let _call = read_call()?;
     model_source::lookup(name)?;
 
     // Validate the Checkpoint name without consulting the environment. An invalid name remains a
@@ -83,11 +83,22 @@ fn infer(name: &str) -> Result<()> {
     Store::at("").checkpoint_dir(name)?;
     let store = Store::from_env()?;
     if store.provenance(name)?.is_none() {
-        return Err(crate::error::Error::MissingCheckpoint {
+        return Err(Error::MissingCheckpoint {
             name: name.to_string(),
         });
     }
-    Err(crate::error::Error::InferenceUnavailable)
+    Err(Error::InferenceUnavailable)
+}
+
+/// Read the System One Call from stdin, the only place `infer` takes input: a reader that fails is
+/// this command's failure, while bytes that are not a Call are the caller's.
+fn read_call() -> Result<Call> {
+    let mut input = Vec::new();
+    io::stdin()
+        .lock()
+        .read_to_end(&mut input)
+        .map_err(|error| Error::io("read", "<stdin>", error))?;
+    Call::from_bytes(&input)
 }
 
 /// List the Model Sources s1gate can pull, each with the revision of the Checkpoint the Model Store

@@ -367,6 +367,159 @@ fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
     assert!(run.stderr.contains("s1gate pull"), "{}", run.stderr);
 }
 
+#[test]
+fn infer_rejects_input_that_is_not_utf8() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        b"{\"state\":\"\xff\"}",
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("System One Call"), "{}", run.stderr);
+    assert!(run.stderr.contains("UTF-8"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_names_the_call_once_in_a_diagnostic() {
+    let run = run_with_input(&["infer", "--name", "convaiinnovations/laya"], "not JSON");
+
+    assert_eq!(run.code, 2);
+    assert_eq!(
+        run.stderr.matches("System One Call").count(),
+        1,
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn infer_rejects_a_score_level_that_is_not_a_string() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "urgency": {
+                    "type": "score",
+                    "instructions": "How urgent?",
+                    "criteria": ["low", 1]
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("urgency"), "{}", run.stderr);
+    assert!(run.stderr.contains("string Levels"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_duplicate_score_levels() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "urgency": {
+                    "type": "score",
+                    "instructions": "How urgent?",
+                    "criteria": ["low", "low"]
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("urgency"), "{}", run.stderr);
+    assert!(run.stderr.contains("distinct Levels"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_names_the_question_whose_option_name_is_unusable() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {
+                    "type": "choice",
+                    "instructions": "Where should this go?",
+                    "criteria": ["billing", ""]
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("Question `route` Option name"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stderr.matches("invalid System One Call").count(),
+        1,
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn infer_names_the_question_whose_options_repeat() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {
+                    "type": "choice",
+                    "instructions": "Where should this go?",
+                    "criteria": {"billing": "payments", "billing": "billing"}
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("route"), "{}", run.stderr);
+    assert!(run.stderr.contains("distinct Options"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_escapes_the_question_id_it_rejects() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{"state":"x","questions":{"a\u001b[2Kb":{"type":"noul","instructions":"x"}}}"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains(r"a\u{1b}[2Kb"), "{}", run.stderr);
+    assert!(!run.stderr.contains('\u{1b}'), "{}", run.stderr);
+}
+
+#[test]
+fn infer_escapes_a_duplicated_question_id_it_rejects() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "a\u001b[2Kb": {"type": "noul", "instructions": "x"},
+                "a\u001b[2Kb": {"type": "noul", "instructions": "y"}
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains(r"a\u{1b}[2Kb"), "{}", run.stderr);
+    assert!(!run.stderr.contains('\u{1b}'), "{}", run.stderr);
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -390,7 +543,7 @@ fn run_in(data_home: &TempDir, args: &[&str]) -> Run {
     }
 }
 
-fn run_with_input(args: &[&str], input: &str) -> Run {
+fn run_with_input(args: &[&str], input: impl AsRef<[u8]>) -> Run {
     let data_home = TempDir::new("cli-infer");
     let mut child = Command::new(binary())
         .args(args)
@@ -404,7 +557,7 @@ fn run_with_input(args: &[&str], input: &str) -> Run {
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(input.as_bytes())
+        .write_all(input.as_ref())
         .expect("the call is written");
     let output = child.wait_with_output().expect("the s1gate process exits");
     Run {
