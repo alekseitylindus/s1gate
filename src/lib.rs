@@ -4,6 +4,7 @@
 //! Only [`pull`] reaches the network; the HTTP client lives inside that module alone (ADR-0003).
 //! Vocabulary: `CONTEXT.md`. Decisions: `docs/adr/`.
 
+pub mod call;
 pub mod cli;
 pub mod error;
 pub mod model_source;

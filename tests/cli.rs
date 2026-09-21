@@ -4,7 +4,9 @@
 mod support;
 
 use std::fs;
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 
 use s1gate::provenance::{FileRecord, Provenance};
 use support::TempDir;
@@ -148,6 +150,223 @@ fn help_describes_pull() {
     );
 }
 
+#[test]
+fn infer_requires_a_model_source_name() {
+    let run = run_with_input(&["infer"], "{}");
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("--name"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_invalid_json_without_writing_stdout() {
+    let run = run_with_input(&["infer", "--name", "convaiinnovations/laya"], "not JSON");
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("System One Call"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_trailing_json() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{"state":"x","questions":{}} {}"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("trailing"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_a_choice_with_one_option_before_loading_the_checkpoint() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {
+                    "type": "choice",
+                    "instructions": "Where should this go?",
+                    "criteria": {"billing": "payments"}
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("route"), "{}", run.stderr);
+    assert!(run.stderr.contains("at least two"), "{}", run.stderr);
+    assert!(run.stderr.contains("Options"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_duplicate_choice_options() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {
+                    "type": "choice",
+                    "instructions": "Where should this go?",
+                    "criteria": ["billing", "billing"]
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("distinct Options"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_an_uncurated_model_source_before_locating_the_store() {
+    let run = run_with_input(
+        &["infer", "--name", "some/other-model"],
+        r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+    );
+
+    assert_eq!(run.code, 2);
+    let stderr = run.stderr;
+    assert!(
+        stderr.contains("unsupported Model Source `some/other-model`"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn infer_rejects_a_score_with_choice_criteria() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "urgency": {
+                    "type": "score",
+                    "instructions": "How urgent?",
+                    "criteria": {"low": "later", "high": "now"}
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("score Criteria must be an array"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn infer_rejects_a_noul_with_only_one_option() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "risk": {
+                    "type": "noul",
+                    "instructions": "Is it risky?",
+                    "criteria": {"true": "risky"}
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("false and true"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_an_unknown_question_type() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {"type": "ranking", "instructions": "x", "criteria": ["a", "b"]}
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("choice"), "{}", run.stderr);
+    assert!(run.stderr.contains("score"), "{}", run.stderr);
+    assert!(run.stderr.contains("noul"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_rejects_duplicate_question_ids() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "route": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]},
+                "route": {"type": "choice", "instructions": "y", "criteria": ["c", "d"]}
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("duplicate Question id `route`"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn infer_rejects_an_empty_question_id() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": "x",
+            "questions": {
+                "": {"type": "score", "instructions": "x", "criteria": ["low", "high"]}
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 2);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("Question id"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
+    let run = run_with_input(
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": {"body": "x"},
+            "questions": {
+                "route": {"type": "choice", "instructions": "Where?", "criteria": ["a", "b"]},
+                "urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["low", "high"]},
+                "risk": {"type": "noul", "instructions": "Is it risky?"}
+            }
+        }"#,
+    );
+
+    assert_eq!(run.code, 1);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("Checkpoint `convaiinnovations/laya`"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("s1gate pull"), "{}", run.stderr);
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -164,6 +383,30 @@ fn run_in(data_home: &TempDir, args: &[&str]) -> Run {
         .env("XDG_DATA_HOME", data_home.path())
         .output()
         .expect("the s1gate binary runs");
+    Run {
+        code: output.status.code().expect("the binary exits"),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn run_with_input(args: &[&str], input: &str) -> Run {
+    let data_home = TempDir::new("cli-infer");
+    let mut child = Command::new(binary())
+        .args(args)
+        .env("XDG_DATA_HOME", data_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the s1gate binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("the call is written");
+    let output = child.wait_with_output().expect("the s1gate process exits");
     Run {
         code: output.status.code().expect("the binary exits"),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

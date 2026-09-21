@@ -1,7 +1,9 @@
 //! The command line: one subcommand per operation.
 
 use clap::{Parser, Subcommand};
+use std::io;
 
+use crate::call::Call;
 use crate::error::Result;
 use crate::model_source;
 use crate::pull::{self, Hub, PullRequest};
@@ -34,6 +36,12 @@ enum Command {
         #[arg(long, requires = "model")]
         force: bool,
     },
+    /// Judge one System One Call from JSON on stdin without network access
+    Infer {
+        /// The Model Source whose local Checkpoint should judge the call
+        #[arg(long, value_name = "MODEL")]
+        name: String,
+    },
 }
 
 /// Parse the command line, run the command, and report what it did. Exit codes are the caller's:
@@ -61,7 +69,25 @@ pub fn run() -> Result<()> {
             report(&outcome);
             Ok(())
         }
+        Command::Infer { name } => infer(&name),
     }
+}
+
+fn infer(name: &str) -> Result<()> {
+    let mut stdin = io::stdin().lock();
+    let _call = Call::read(&mut stdin)?;
+    model_source::lookup(name)?;
+
+    // Validate the Checkpoint name without consulting the environment. An invalid name remains a
+    // usage error even on a host with no configured Model Store.
+    Store::at("").checkpoint_dir(name)?;
+    let store = Store::from_env()?;
+    if store.provenance(name)?.is_none() {
+        return Err(crate::error::Error::MissingCheckpoint {
+            name: name.to_string(),
+        });
+    }
+    Err(crate::error::Error::InferenceUnavailable)
 }
 
 /// List the Model Sources s1gate can pull, each with the revision of the Checkpoint the Model Store

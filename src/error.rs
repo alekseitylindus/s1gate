@@ -35,6 +35,12 @@ pub enum Error {
     },
     /// The request to the Model Source did not complete.
     Transport { url: String, message: String },
+    /// The JSON supplied to `infer` is not one valid System One Call.
+    InvalidCall { message: String },
+    /// The requested Checkpoint is not in the local Model Store.
+    MissingCheckpoint { name: String },
+    /// The input contract exists before native inference does.
+    InferenceUnavailable,
     /// The Pull did not carry the number of bytes the Model Source announced.
     SizeMismatch {
         path: String,
@@ -80,10 +86,18 @@ impl Error {
         }
     }
 
+    pub fn invalid_call(message: impl Into<String>) -> Self {
+        Error::InvalidCall {
+            message: message.into(),
+        }
+    }
+
     /// 0 success, 1 runtime error, 2 usage error.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::UnsupportedSource { .. } | Error::InvalidName { .. } => 2,
+            Error::UnsupportedSource { .. }
+            | Error::InvalidName { .. }
+            | Error::InvalidCall { .. } => 2,
             _ => 1,
         }
     }
@@ -138,6 +152,14 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Error::Transport { url, message } => write!(f, "cannot reach {url}: {message}"),
+            Error::InvalidCall { message } => write!(f, "invalid System One Call: {message}"),
+            Error::MissingCheckpoint { name } => write!(
+                f,
+                "Checkpoint `{name}` is not in the Model Store; run `s1gate pull {name}` first"
+            ),
+            Error::InferenceUnavailable => {
+                write!(f, "native inference is not available yet")
+            }
             Error::SizeMismatch {
                 path,
                 expected,
