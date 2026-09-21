@@ -11,5 +11,6 @@ pub mod model_source;
 pub mod provenance;
 pub mod pull;
 pub mod store;
+pub mod verify;
 
 pub use error::{Error, Result};

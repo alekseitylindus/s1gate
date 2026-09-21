@@ -60,6 +60,54 @@ impl Store {
             .map_err(|error| Error::json(path.display().to_string(), error))
     }
 
+    /// List the Checkpoints addressed by two directory levels below this store. A missing store
+    /// root is an empty store.
+    pub fn checkpoint_names(&self) -> Result<Vec<String>> {
+        let owners = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io("read", &self.root, error)),
+        };
+        let mut names = Vec::new();
+        for owner in owners {
+            let owner = owner.map_err(|error| Error::io("read", &self.root, error))?;
+            if !owner
+                .file_type()
+                .map_err(|error| Error::io("inspect", owner.path(), error))?
+                .is_dir()
+            {
+                continue;
+            }
+            let checkpoints = std::fs::read_dir(owner.path())
+                .map_err(|error| Error::io("read", owner.path(), error))?;
+            for checkpoint in checkpoints {
+                let checkpoint =
+                    checkpoint.map_err(|error| Error::io("read", owner.path(), error))?;
+                if !checkpoint
+                    .file_type()
+                    .map_err(|error| Error::io("inspect", checkpoint.path(), error))?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let owner_file_name = owner.file_name();
+                let Some(owner_name) = owner_file_name.to_str() else {
+                    continue;
+                };
+                let checkpoint_file_name = checkpoint.file_name();
+                let Some(checkpoint_name) = checkpoint_file_name.to_str() else {
+                    continue;
+                };
+                let name = format!("{owner_name}/{checkpoint_name}");
+                if self.checkpoint_dir(&name).is_ok() {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     /// Record `provenance` as the Checkpoint of `name`, replacing any earlier record. Written
     /// through `provenance.json.part` and renamed, so a record on disk is always complete.
     pub fn record_provenance(&self, name: &str, provenance: &Provenance) -> Result<()> {

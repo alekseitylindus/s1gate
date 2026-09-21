@@ -151,6 +151,26 @@ fn help_describes_pull() {
 }
 
 #[test]
+fn verify_without_a_checkpoint_succeeds_without_network_access() {
+    let run = run(&["verify"]);
+
+    assert_eq!(run.code, 0);
+    assert!(run.stdout.is_empty());
+}
+
+#[test]
+fn verify_rejects_a_name_that_is_not_a_model_source_path() {
+    let run = run(&["verify", "--name", "laya"]);
+
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr.contains("invalid Checkpoint name `laya`"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
 fn infer_requires_a_model_source_name() {
     let run = run_with_input(&["infer"], "{}");
 

@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::model_source;
 use crate::pull::{self, Hub, PullRequest};
 use crate::store::Store;
+use crate::verify as checkpoint_verify;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +43,12 @@ enum Command {
         #[arg(long, value_name = "MODEL")]
         name: String,
     },
+    /// Verify stored Checkpoints against their Provenance without network access
+    Verify {
+        /// Verify one Model Source; without it, verify every stored Checkpoint
+        #[arg(long, value_name = "MODEL")]
+        name: Option<String>,
+    },
 }
 
 /// Parse the command line, run the command, and report what it did. Exit codes are the caller's:
@@ -70,7 +77,30 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::Infer { name } => infer(&name),
+        Command::Verify { name } => verify(name.as_deref()),
     }
+}
+
+fn verify(name: Option<&str>) -> Result<()> {
+    if let Some(name) = name {
+        // Validate the path shape before the environment is consulted, as every command that
+        // addresses a Checkpoint must use one full Model Source name.
+        Store::at("").checkpoint_dir(name)?;
+        model_source::lookup(name)?;
+    }
+    let store = Store::from_env()?;
+    let names = match name {
+        Some(name) => vec![name.to_string()],
+        None => store.checkpoint_names()?,
+    };
+    for name in names {
+        let report = checkpoint_verify::verify(&store, &name)?;
+        println!(
+            "verified {}@{} ({} files)",
+            report.provenance.source, report.provenance.resolved_revision, report.files
+        );
+    }
+    Ok(())
 }
 
 fn infer(name: &str) -> Result<()> {

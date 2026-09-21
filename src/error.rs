@@ -59,6 +59,34 @@ pub enum Error {
         held: String,
         requested: String,
     },
+    /// A file recorded in Provenance is absent from the local Checkpoint.
+    MissingStoredFile { path: PathBuf },
+    /// A local Checkpoint file no longer has its recorded size.
+    StoredSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    /// A local Checkpoint file no longer has its recorded checksum.
+    StoredChecksumMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    /// A Checkpoint's configuration or safetensors structure is invalid.
+    InvalidCheckpoint { path: PathBuf, message: String },
+    /// A required parameter is absent from the safetensors header.
+    MissingParameter { name: String },
+    /// An unrecognized parameter is present in the safetensors header.
+    UnexpectedParameter { name: String },
+    /// A safetensors tensor has the wrong type or shape.
+    ParameterMismatch {
+        name: String,
+        expected_dtype: String,
+        actual_dtype: String,
+        expected_shape: Vec<u64>,
+        actual_shape: Vec<u64>,
+    },
     Io {
         op: &'static str,
         path: PathBuf,
@@ -175,6 +203,46 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "`{path}` hashes to {actual}, but the Model Source publishes {expected}"
+            ),
+            Error::MissingStoredFile { path } => {
+                write!(f, "Checkpoint file {} is missing", path.display())
+            }
+            Error::StoredSizeMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Checkpoint file {} is {actual} bytes, but Provenance records {expected}",
+                path.display()
+            ),
+            Error::StoredChecksumMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Checkpoint file {} sha256 is {actual}, but Provenance records {expected}",
+                path.display()
+            ),
+            Error::InvalidCheckpoint { path, message } => {
+                write!(f, "invalid Checkpoint file {}: {message}", path.display())
+            }
+            Error::MissingParameter { name } => {
+                write!(f, "missing parameter `{name}`")
+            }
+            Error::UnexpectedParameter { name } => {
+                write!(f, "unexpected parameter `{name}`")
+            }
+            Error::ParameterMismatch {
+                name,
+                expected_dtype,
+                actual_dtype,
+                expected_shape,
+                actual_shape,
+            } => write!(
+                f,
+                "parameter `{name}` has dtype {actual_dtype} and shape {actual_shape:?}, expected {expected_dtype} and {expected_shape:?}"
             ),
             Error::RevisionHeld {
                 name,
