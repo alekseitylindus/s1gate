@@ -1,9 +1,10 @@
-//! Hashing a Checkpoint file while Pull streams it, so Pull never holds a whole file in memory.
+//! Hashing a Checkpoint file without holding it in memory: Pull hashes the bytes it streams, and
+//! verification hashes the bytes it reads back.
 
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 
-/// Hashes the bytes Pull streams for one Checkpoint file.
+/// Hashes the bytes Pull streams for one Checkpoint file, or the bytes verification reads back.
 ///
 /// The sha256 is always computed — it is what the Provenance record stores. The git blob object id
 /// is computed only when the file's size is known before the first byte, because that digest is

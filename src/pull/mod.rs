@@ -17,10 +17,9 @@ use crate::model_source::{self, ModelSource};
 use crate::provenance::{Algorithm, FileRecord, Provenance, PublishedChecksum};
 use crate::store::{PART_SUFFIX, Store};
 
-pub mod digest;
 pub mod hub;
 
-use digest::Digest;
+use crate::digest::Digest;
 pub use hub::{Hub, RemoteFile};
 
 /// How many bytes of a Checkpoint file Pull holds in memory at once.

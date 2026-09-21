@@ -10,7 +10,7 @@ use std::process::Stdio;
 
 use s1gate::provenance::{FileRecord, Provenance};
 use support::TempDir;
-use support::checkpoint;
+use support::fixture;
 
 #[test]
 fn pull_without_a_model_source_lists_the_one_s1gate_can_pull() {
@@ -162,17 +162,17 @@ fn an_empty_model_store_verifies_silently() {
 #[test]
 fn verify_with_a_name_proves_the_stored_checkpoint() {
     let data_home = TempDir::new("cli-verify");
-    checkpoint::write(&checkpoint_root(&data_home), checkpoint::header());
+    fixture::write(&checkpoint_root(&data_home), fixture::header());
 
-    let run = run_in(&data_home, &["verify", "--name", checkpoint::NAME]);
+    let run = run_in(&data_home, &["verify", "--name", fixture::NAME]);
 
     assert_eq!(run.code, 0);
     assert_eq!(
         run.stdout,
         format!(
             "verified {}@{} (5 files)\n",
-            checkpoint::NAME,
-            checkpoint::REVISION
+            fixture::NAME,
+            fixture::REVISION
         )
     );
     assert!(run.stderr.is_empty(), "{}", run.stderr);
@@ -182,7 +182,7 @@ fn verify_with_a_name_proves_the_stored_checkpoint() {
 fn verify_without_a_name_verifies_every_checkpoint_the_store_holds() {
     let data_home = TempDir::new("cli-verify-store");
     let root = checkpoint_root(&data_home);
-    checkpoint::write(&root, checkpoint::header());
+    fixture::write(&root, fixture::header());
     // Neither of these is a Checkpoint: the first is a stray directory, the second is what an
     // interrupted Pull leaves behind — a directory whose Provenance record was never written.
     fs::create_dir_all(root.join("scratch/notes")).expect("a stray directory");
@@ -195,8 +195,8 @@ fn verify_without_a_name_verifies_every_checkpoint_the_store_holds() {
         run.stdout,
         format!(
             "verified {}@{} (5 files)\n",
-            checkpoint::NAME,
-            checkpoint::REVISION
+            fixture::NAME,
+            fixture::REVISION
         )
     );
     assert!(run.stderr.is_empty(), "{}", run.stderr);
@@ -206,7 +206,7 @@ fn verify_without_a_name_verifies_every_checkpoint_the_store_holds() {
 fn verify_reports_a_failed_checkpoint_and_verifies_the_rest() {
     let data_home = TempDir::new("cli-verify-stale");
     let root = checkpoint_root(&data_home);
-    checkpoint::write(&root, checkpoint::header());
+    fixture::write(&root, fixture::header());
     // A Checkpoint of a Model Source s1gate no longer supports: the store, not the command line,
     // is what is out of date, so the sweep reports it and carries on.
     fs::create_dir_all(root.join("someone/other")).expect("a stale Checkpoint");
@@ -219,8 +219,8 @@ fn verify_reports_a_failed_checkpoint_and_verifies_the_rest() {
         run.stdout,
         format!(
             "verified {}@{} (5 files)\n",
-            checkpoint::NAME,
-            checkpoint::REVISION
+            fixture::NAME,
+            fixture::REVISION
         ),
         "the Checkpoints that verify are still reported"
     );
@@ -241,7 +241,7 @@ fn verify_reports_a_failed_checkpoint_and_verifies_the_rest() {
 #[test]
 fn verify_names_the_checkpoint_a_failure_came_from() {
     let data_home = TempDir::new("cli-verify-missing-file");
-    let directory = checkpoint::write(&checkpoint_root(&data_home), checkpoint::header());
+    let directory = fixture::write(&checkpoint_root(&data_home), fixture::header());
     fs::remove_file(directory.join("model.safetensors")).expect("remove a Checkpoint file");
 
     let run = run_in(&data_home, &["verify"]);

@@ -6,30 +6,30 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use support::checkpoint;
+use support::fixture;
 use support::{TempDir, git_blob_sha1, sha256, tree};
 
 use s1gate::Error;
 use s1gate::model_source::{self, ModelSource};
 use s1gate::provenance::{Algorithm, Provenance, PublishedChecksum};
 use s1gate::store::Store;
-use s1gate::verify;
+use s1gate::checkpoint;
 
 /// The curated Model Source the fixture Checkpoint came from.
 fn source() -> &'static ModelSource {
-    model_source::lookup(checkpoint::NAME).expect("laya is curated")
+    model_source::lookup(fixture::NAME).expect("laya is curated")
 }
 
 #[test]
 fn an_intact_checkpoint_verifies_from_local_files() {
     let root = TempDir::new("verify-intact");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     let before = tree(&directory);
 
     let report =
-        verify::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
+        checkpoint::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
 
-    assert_eq!(report.provenance.resolved_revision, checkpoint::REVISION);
+    assert_eq!(report.provenance.resolved_revision, fixture::REVISION);
     assert_eq!(report.files, 5);
     assert_eq!(tree(&directory), before, "verification writes nothing");
 }
@@ -37,15 +37,15 @@ fn an_intact_checkpoint_verifies_from_local_files() {
 #[test]
 fn a_checkpoint_of_head_layers_and_several_encoder_layers_verifies() {
     let root = TempDir::new("verify-layered");
-    checkpoint::write_with(
+    fixture::write_with(
         root.path(),
-        checkpoint::LAYERED_ENCODER_CONFIG,
-        checkpoint::LAYERED_AGENT_CONFIG,
-        checkpoint::layered_header(),
+        fixture::LAYERED_ENCODER_CONFIG,
+        fixture::LAYERED_AGENT_CONFIG,
+        fixture::layered_header(),
     );
 
     let report =
-        verify::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
+        checkpoint::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
 
     assert_eq!(report.files, 5);
 }
@@ -53,19 +53,19 @@ fn a_checkpoint_of_head_layers_and_several_encoder_layers_verifies() {
 #[test]
 fn verification_rejects_a_norm_on_the_encoder_layer_that_has_none() {
     let root = TempDir::new("verify-layer-zero-norm");
-    let mut header = checkpoint::layered_header();
+    let mut header = fixture::layered_header();
     header.insert(
         "encoder.layers.0.attn_norm.weight".to_string(),
-        checkpoint::tensor("F16", &[4]),
+        fixture::tensor("F16", &[4]),
     );
-    checkpoint::write_with(
+    fixture::write_with(
         root.path(),
-        checkpoint::LAYERED_ENCODER_CONFIG,
-        checkpoint::LAYERED_AGENT_CONFIG,
+        fixture::LAYERED_ENCODER_CONFIG,
+        fixture::LAYERED_AGENT_CONFIG,
         header,
     );
 
-    let error = verify::verify(&Store::at(root.path()), source())
+    let error = checkpoint::verify(&Store::at(root.path()), source())
         .expect_err("layer 0 has an identity norm");
 
     assert!(matches!(error, Error::UnexpectedParameter { .. }));
@@ -80,17 +80,17 @@ fn verification_rejects_a_norm_on_the_encoder_layer_that_has_none() {
 #[test]
 fn verification_rejects_a_missing_head_layer_parameter() {
     let root = TempDir::new("verify-missing-head-parameter");
-    let mut header = checkpoint::layered_header();
+    let mut header = fixture::layered_header();
     header.remove("head.layers.0.self_attn.out_proj.bias");
-    checkpoint::write_with(
+    fixture::write_with(
         root.path(),
-        checkpoint::LAYERED_ENCODER_CONFIG,
-        checkpoint::LAYERED_AGENT_CONFIG,
+        fixture::LAYERED_ENCODER_CONFIG,
+        fixture::LAYERED_AGENT_CONFIG,
         header,
     );
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the parameter is gone");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the parameter is gone");
 
     assert!(matches!(error, Error::MissingParameter { .. }));
     assert_eq!(
@@ -102,13 +102,13 @@ fn verification_rejects_a_missing_head_layer_parameter() {
 #[test]
 fn verification_reports_a_changed_file() {
     let root = TempDir::new("verify-changed-file");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     let path = directory.join("encoder/config.json");
     let size = fs::metadata(&path).expect("the config exists").len() as usize;
     fs::write(&path, vec![b'x'; size]).expect("change the local file");
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the changed file fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the changed file fails");
 
     assert!(matches!(error, Error::StoredChecksumMismatch { .. }));
     assert!(error.to_string().contains("encoder/config.json"), "{error}");
@@ -117,11 +117,11 @@ fn verification_reports_a_changed_file() {
 #[test]
 fn verification_reports_a_missing_file() {
     let root = TempDir::new("verify-missing-file");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     fs::remove_file(directory.join("model.safetensors")).expect("remove a file");
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the missing file fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the missing file fails");
 
     assert!(matches!(error, Error::MissingStoredFile { .. }));
     assert_eq!(
@@ -133,11 +133,11 @@ fn verification_reports_a_missing_file() {
 #[test]
 fn verification_reports_a_size_change() {
     let root = TempDir::new("verify-size-change");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     fs::write(directory.join("encoder/config.json"), b"short").expect("change the local file size");
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the size change fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the size change fails");
 
     assert!(matches!(error, Error::StoredSizeMismatch { .. }));
     assert!(error.to_string().contains("encoder/config.json"), "{error}");
@@ -146,7 +146,7 @@ fn verification_reports_a_size_change() {
 #[test]
 fn verification_accepts_the_checksums_the_model_source_publishes() {
     let root = TempDir::new("verify-published");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     // The Model Source publishes a sha256 for the file it holds in LFS and a git blob object id for
     // the four it tracks in git (ADR-0010).
     rewrite_provenance(root.path(), |provenance| {
@@ -167,7 +167,7 @@ fn verification_accepts_the_checksums_the_model_source_publishes() {
     });
 
     let report =
-        verify::verify(&Store::at(root.path()), source()).expect("the published values agree");
+        checkpoint::verify(&Store::at(root.path()), source()).expect("the published values agree");
 
     assert_eq!(report.files, 5);
 }
@@ -175,7 +175,7 @@ fn verification_accepts_the_checksums_the_model_source_publishes() {
 #[test]
 fn verification_reports_a_published_checksum_that_disagrees() {
     let root = TempDir::new("verify-published-sha256");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         provenance.files[0].published = Some(PublishedChecksum {
             algorithm: Algorithm::Sha256,
@@ -183,7 +183,7 @@ fn verification_reports_a_published_checksum_that_disagrees() {
         });
     });
 
-    let error = verify::verify(&Store::at(root.path()), source())
+    let error = checkpoint::verify(&Store::at(root.path()), source())
         .expect_err("the published checksum fails");
 
     assert!(matches!(error, Error::ChecksumMismatch { .. }));
@@ -197,7 +197,7 @@ fn verification_reports_a_published_checksum_that_disagrees() {
 #[test]
 fn verification_reports_a_published_blob_id_that_disagrees() {
     let root = TempDir::new("verify-published-blob");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         provenance.files[1].published = Some(PublishedChecksum {
             algorithm: Algorithm::GitBlobSha1,
@@ -206,7 +206,7 @@ fn verification_reports_a_published_blob_id_that_disagrees() {
     });
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the published blob id fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the published blob id fails");
 
     assert!(matches!(error, Error::ChecksumMismatch { .. }));
     assert!(
@@ -218,15 +218,15 @@ fn verification_reports_a_published_blob_id_that_disagrees() {
 #[test]
 fn verification_rejects_a_parameter_the_manifest_does_not_ask_for() {
     let root = TempDir::new("verify-unexpected-parameter");
-    let mut header = checkpoint::header();
+    let mut header = fixture::header();
     header.insert(
         "unexpected.weight".to_string(),
-        checkpoint::tensor("F16", &[1]),
+        fixture::tensor("F16", &[1]),
     );
-    checkpoint::write(root.path(), header);
+    fixture::write(root.path(), header);
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the extra parameter fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the extra parameter fails");
 
     assert!(matches!(error, Error::UnexpectedParameter { .. }));
     assert!(error.to_string().contains("`unexpected.weight`"), "{error}");
@@ -235,12 +235,12 @@ fn verification_rejects_a_parameter_the_manifest_does_not_ask_for() {
 #[test]
 fn verification_rejects_a_parameter_of_the_wrong_shape() {
     let root = TempDir::new("verify-wrong-shape");
-    let mut header = checkpoint::header();
-    header.insert("temperature".to_string(), checkpoint::tensor("F16", &[3]));
-    checkpoint::write(root.path(), header);
+    let mut header = fixture::header();
+    header.insert("temperature".to_string(), fixture::tensor("F16", &[3]));
+    fixture::write(root.path(), header);
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the wrong shape fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the wrong shape fails");
 
     assert!(matches!(error, Error::ParameterMismatch { .. }));
     assert!(error.to_string().contains("`temperature`"), "{error}");
@@ -250,11 +250,11 @@ fn verification_rejects_a_parameter_of_the_wrong_shape() {
 #[test]
 fn verification_rejects_a_dtype_safetensors_does_not_define() {
     let root = TempDir::new("verify-unsupported-dtype");
-    let mut header = checkpoint::header();
-    header.insert("temperature".to_string(), checkpoint::tensor("F4", &[3]));
-    checkpoint::write(root.path(), header);
+    let mut header = fixture::header();
+    header.insert("temperature".to_string(), fixture::tensor("F4", &[3]));
+    fixture::write(root.path(), header);
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("the dtype fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the dtype fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -266,16 +266,16 @@ fn verification_rejects_a_dtype_safetensors_does_not_define() {
 #[test]
 fn verification_rejects_a_shape_that_cannot_be_a_length() {
     let root = TempDir::new("verify-huge-shape");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     // Written by hand: a tensor of this shape has no length, and no builder here could lay it out.
     let header = serde_json::json!({
         "big.weight": {"dtype": "F16", "shape": [u64::MAX, 2], "data_offsets": [0, 0]},
     });
-    let bytes = checkpoint::safetensors_without_data(&header);
+    let bytes = fixture::safetensors_without_data(&header);
     fs::write(directory.join("model.safetensors"), &bytes).expect("corrupt the weights");
     record_file(root.path(), "model.safetensors", &bytes);
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("the shape fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the shape fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -289,7 +289,7 @@ fn verification_rejects_a_shape_that_cannot_be_a_length() {
 #[test]
 fn verification_rejects_a_malformed_safetensors_header() {
     let root = TempDir::new("verify-bad-header");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     let path = directory.join("model.safetensors");
     let mut bytes = fs::read(&path).expect("the weights");
     bytes[8] = b'!';
@@ -297,7 +297,7 @@ fn verification_rejects_a_malformed_safetensors_header() {
     record_file(root.path(), "model.safetensors", &bytes);
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the malformed header fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the malformed header fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(error.to_string().contains("header"), "{error}");
@@ -306,13 +306,13 @@ fn verification_rejects_a_malformed_safetensors_header() {
 #[test]
 fn verification_rejects_a_record_that_names_another_model_source() {
     let root = TempDir::new("verify-foreign-source");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         provenance.source = "someone/else".to_string();
     });
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("a foreign record fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("a foreign record fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -326,13 +326,13 @@ fn verification_rejects_a_record_that_names_another_model_source() {
 #[test]
 fn verification_rejects_a_record_with_duplicate_files() {
     let root = TempDir::new("verify-duplicate-records");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         let path = provenance.files[0].path.clone();
         provenance.files[1].path = path;
     });
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("the duplicate fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the duplicate fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -344,12 +344,12 @@ fn verification_rejects_a_record_with_duplicate_files() {
 #[test]
 fn verification_rejects_a_record_missing_an_allowlisted_file() {
     let root = TempDir::new("verify-foreign-record");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         provenance.files[0].path = "README.md".to_string();
     });
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("the record fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the record fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -363,12 +363,12 @@ fn verification_rejects_a_record_missing_an_allowlisted_file() {
 #[test]
 fn verification_rejects_a_record_with_the_wrong_number_of_files() {
     let root = TempDir::new("verify-record-count");
-    checkpoint::write(root.path(), checkpoint::header());
+    fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
         provenance.files.pop();
     });
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("the count fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the count fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -382,11 +382,11 @@ fn verification_rejects_a_record_with_the_wrong_number_of_files() {
 #[test]
 fn verification_rejects_a_record_that_cannot_be_read() {
     let root = TempDir::new("verify-truncated-record");
-    let directory = checkpoint::write(root.path(), checkpoint::header());
+    let directory = fixture::write(root.path(), fixture::header());
     fs::write(directory.join("provenance.json"), b"{\"source\":").expect("truncate the record");
 
     let error =
-        verify::verify(&Store::at(root.path()), source()).expect_err("the truncated record fails");
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the truncated record fails");
 
     assert!(matches!(error, Error::Json { .. }));
     assert!(error.to_string().contains("provenance.json"), "{error}");
@@ -396,7 +396,7 @@ fn verification_rejects_a_record_that_cannot_be_read() {
 fn verification_reports_a_checkpoint_the_store_does_not_hold() {
     let root = TempDir::new("verify-absent");
 
-    let error = verify::verify(&Store::at(root.path()), source()).expect_err("nothing is stored");
+    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("nothing is stored");
 
     assert!(matches!(error, Error::MissingCheckpoint { .. }));
 }
@@ -405,12 +405,12 @@ fn verification_reports_a_checkpoint_the_store_does_not_hold() {
 fn rewrite_provenance(root: &Path, edit: impl FnOnce(&mut Provenance)) {
     let store = Store::at(root);
     let mut provenance = store
-        .provenance(checkpoint::NAME)
+        .provenance(fixture::NAME)
         .expect("read Provenance")
         .expect("a Provenance record");
     edit(&mut provenance);
     store
-        .record_provenance(checkpoint::NAME, &provenance)
+        .record_provenance(fixture::NAME, &provenance)
         .expect("rewrite Provenance");
 }
 
