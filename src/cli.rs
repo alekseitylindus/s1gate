@@ -5,7 +5,7 @@ use std::io::{self, Read};
 
 use crate::call::Call;
 use crate::error::{Error, Result};
-use crate::model_source;
+use crate::model_source::{self, ModelSource};
 use crate::pull::{self, Hub, PullRequest};
 use crate::store::Store;
 use crate::verify as checkpoint_verify;
@@ -82,35 +82,62 @@ pub fn run() -> Result<()> {
 }
 
 fn verify(name: Option<&str>) -> Result<()> {
-    if let Some(name) = name {
-        // Validate the path shape before the environment is consulted, as every command that
-        // addresses a Checkpoint must use one full Model Source name.
-        Store::at("").checkpoint_dir(name)?;
-        model_source::lookup(name)?;
-    }
+    // The name is checked before the environment is consulted, so an invalid name stays a usage
+    // error on a host with no Model Store.
+    let named = name.map(checkpoint_name).transpose()?;
     let store = Store::from_env()?;
-    let names = match name {
-        Some(name) => vec![name.to_string()],
-        None => store.checkpoint_names()?,
-    };
-    for name in names {
-        let report = checkpoint_verify::verify(&store, &name)?;
-        println!(
-            "verified {}@{} ({} files)",
-            report.provenance.source, report.provenance.resolved_revision, report.files
-        );
+    match named {
+        Some(source) => {
+            report_verified(&checkpoint_verify::verify(&store, source)?);
+            Ok(())
+        }
+        None => verify_stored(&store),
     }
-    Ok(())
+}
+
+/// Verify every Checkpoint the store holds, reporting each failure rather than stopping at the
+/// first: the operator asked about the whole store, and one broken Checkpoint says nothing about
+/// the others. Each failure names the Checkpoint it came from, which the errors themselves do not.
+fn verify_stored(store: &Store) -> Result<()> {
+    let names = store.checkpoint_names()?;
+    let total = names.len();
+    let mut failed = 0;
+    for name in names {
+        match model_source::lookup(&name)
+            .and_then(|source| checkpoint_verify::verify(store, source))
+        {
+            Ok(report) => report_verified(&report),
+            Err(error) => {
+                failed += 1;
+                eprintln!("s1gate: {name}: {error}");
+            }
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        failed => Err(Error::VerificationFailed { failed, total }),
+    }
+}
+
+fn report_verified(report: &checkpoint_verify::Report) {
+    println!(
+        "verified {}@{} ({} files)",
+        report.provenance.source, report.provenance.resolved_revision, report.files
+    );
+}
+
+/// The curated Model Source `name` addresses. A command that addresses a Checkpoint takes one full
+/// Model Source name, `<owner>/<name>` (ADR-0011), and the name is validated before the
+/// environment is consulted, so an invalid name stays a usage error on a host with no Model Store.
+fn checkpoint_name(name: &str) -> Result<&'static ModelSource> {
+    Store::at("").checkpoint_dir(name)?;
+    model_source::lookup(name)
 }
 
 fn infer(name: &str) -> Result<()> {
     // Judging the call is a Backend's job; this command owns the input and error contract alone.
     let _call = read_call()?;
-    model_source::lookup(name)?;
-
-    // Validate the Checkpoint name without consulting the environment. An invalid name remains a
-    // usage error even on a host with no configured Model Store.
-    Store::at("").checkpoint_dir(name)?;
+    let name = checkpoint_name(name)?.repo;
     let store = Store::from_env()?;
     if store.provenance(name)?.is_none() {
         return Err(Error::MissingCheckpoint {

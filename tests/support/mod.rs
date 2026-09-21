@@ -17,6 +17,8 @@ use parking_lot::Mutex;
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 
+pub mod checkpoint;
+
 pub struct FakeSource {
     port: u16,
     state: Arc<Mutex<State>>,

@@ -10,6 +10,7 @@ use std::process::Stdio;
 
 use s1gate::provenance::{FileRecord, Provenance};
 use support::TempDir;
+use support::checkpoint;
 
 #[test]
 fn pull_without_a_model_source_lists_the_one_s1gate_can_pull() {
@@ -151,11 +152,109 @@ fn help_describes_pull() {
 }
 
 #[test]
-fn verify_without_a_checkpoint_succeeds_without_network_access() {
+fn an_empty_model_store_verifies_silently() {
     let run = run(&["verify"]);
 
     assert_eq!(run.code, 0);
     assert!(run.stdout.is_empty());
+}
+
+#[test]
+fn verify_with_a_name_proves_the_stored_checkpoint() {
+    let data_home = TempDir::new("cli-verify");
+    checkpoint::write(&checkpoint_root(&data_home), checkpoint::header());
+
+    let run = run_in(&data_home, &["verify", "--name", checkpoint::NAME]);
+
+    assert_eq!(run.code, 0);
+    assert_eq!(
+        run.stdout,
+        format!(
+            "verified {}@{} (5 files)\n",
+            checkpoint::NAME,
+            checkpoint::REVISION
+        )
+    );
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+}
+
+#[test]
+fn verify_without_a_name_verifies_every_checkpoint_the_store_holds() {
+    let data_home = TempDir::new("cli-verify-store");
+    let root = checkpoint_root(&data_home);
+    checkpoint::write(&root, checkpoint::header());
+    // Neither of these is a Checkpoint: the first is a stray directory, the second is what an
+    // interrupted Pull leaves behind — a directory whose Provenance record was never written.
+    fs::create_dir_all(root.join("scratch/notes")).expect("a stray directory");
+    fs::create_dir_all(root.join("convaiinnovations/incomplete")).expect("an interrupted Pull");
+
+    let run = run_in(&data_home, &["verify"]);
+
+    assert_eq!(run.code, 0);
+    assert_eq!(
+        run.stdout,
+        format!(
+            "verified {}@{} (5 files)\n",
+            checkpoint::NAME,
+            checkpoint::REVISION
+        )
+    );
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+}
+
+#[test]
+fn verify_reports_a_failed_checkpoint_and_verifies_the_rest() {
+    let data_home = TempDir::new("cli-verify-stale");
+    let root = checkpoint_root(&data_home);
+    checkpoint::write(&root, checkpoint::header());
+    // A Checkpoint of a Model Source s1gate no longer supports: the store, not the command line,
+    // is what is out of date, so the sweep reports it and carries on.
+    fs::create_dir_all(root.join("someone/other")).expect("a stale Checkpoint");
+    fs::write(root.join("someone/other/provenance.json"), b"{}").expect("a record");
+
+    let run = run_in(&data_home, &["verify"]);
+
+    assert_eq!(run.code, 1);
+    assert_eq!(
+        run.stdout,
+        format!(
+            "verified {}@{} (5 files)\n",
+            checkpoint::NAME,
+            checkpoint::REVISION
+        ),
+        "the Checkpoints that verify are still reported"
+    );
+    assert!(
+        run.stderr
+            .contains("s1gate: someone/other: unsupported Model Source"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("1 of 2 Checkpoints failed verification"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn verify_names_the_checkpoint_a_failure_came_from() {
+    let data_home = TempDir::new("cli-verify-missing-file");
+    let directory = checkpoint::write(&checkpoint_root(&data_home), checkpoint::header());
+    fs::remove_file(directory.join("model.safetensors")).expect("remove a Checkpoint file");
+
+    let run = run_in(&data_home, &["verify"]);
+
+    assert_eq!(run.code, 1);
+    assert!(run.stdout.is_empty(), "{}", run.stdout);
+    assert_eq!(
+        run.stderr,
+        concat!(
+            "s1gate: convaiinnovations/laya: Checkpoint file `model.safetensors` is missing\n",
+            "s1gate: 1 of 1 Checkpoints failed verification\n"
+        )
+    );
 }
 
 #[test]
@@ -168,6 +267,41 @@ fn verify_rejects_a_name_that_is_not_a_model_source_path() {
         "{}",
         run.stderr
     );
+}
+
+#[test]
+fn verify_rejects_an_unsupported_model_source() {
+    let run = run(&["verify", "--name", "some/other-model"]);
+
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr
+            .contains("unsupported Model Source `some/other-model`"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn verify_validates_the_name_before_locating_the_store() {
+    let output = Command::new(binary())
+        .args(["verify", "--name", "laya"])
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("HOME")
+        .output()
+        .expect("the s1gate binary runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid Checkpoint name `laya`"),
+        "the name is checked before the environment: {stderr}"
+    );
+}
+
+/// The Model Store root `data_home` holds, where a Checkpoint is written for the binary to find.
+fn checkpoint_root(data_home: &TempDir) -> std::path::PathBuf {
+    data_home.path().join("s1gate/models")
 }
 
 #[test]

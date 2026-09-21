@@ -60,8 +60,10 @@ impl Store {
             .map_err(|error| Error::json(path.display().to_string(), error))
     }
 
-    /// List the Checkpoints addressed by two directory levels below this store. A missing store
-    /// root is an empty store.
+    /// List the Checkpoints this store holds: the directory names, two levels below the root, that
+    /// record a Provenance. A missing store root holds no Checkpoint, and neither does a directory
+    /// a Pull left incomplete — the record is written last. Entries that are not directories, and
+    /// names that are not UTF-8, are not Checkpoints and are skipped.
     pub fn checkpoint_names(&self) -> Result<Vec<String>> {
         let owners = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
@@ -71,37 +73,29 @@ impl Store {
         let mut names = Vec::new();
         for owner in owners {
             let owner = owner.map_err(|error| Error::io("read", &self.root, error))?;
-            if !owner
-                .file_type()
-                .map_err(|error| Error::io("inspect", owner.path(), error))?
-                .is_dir()
-            {
+            if !is_directory(&owner)? {
                 continue;
             }
+            let owner_file_name = owner.file_name();
+            let Some(owner_name) = owner_file_name.to_str() else {
+                continue;
+            };
             let checkpoints = std::fs::read_dir(owner.path())
                 .map_err(|error| Error::io("read", owner.path(), error))?;
             for checkpoint in checkpoints {
                 let checkpoint =
                     checkpoint.map_err(|error| Error::io("read", owner.path(), error))?;
-                if !checkpoint
-                    .file_type()
-                    .map_err(|error| Error::io("inspect", checkpoint.path(), error))?
-                    .is_dir()
-                {
+                if !is_directory(&checkpoint)? {
                     continue;
                 }
-                let owner_file_name = owner.file_name();
-                let Some(owner_name) = owner_file_name.to_str() else {
-                    continue;
-                };
                 let checkpoint_file_name = checkpoint.file_name();
                 let Some(checkpoint_name) = checkpoint_file_name.to_str() else {
                     continue;
                 };
-                let name = format!("{owner_name}/{checkpoint_name}");
-                if self.checkpoint_dir(&name).is_ok() {
-                    names.push(name);
+                if !checkpoint.path().join(Provenance::FILE_NAME).is_file() {
+                    continue;
                 }
+                names.push(format!("{owner_name}/{checkpoint_name}"));
             }
         }
         names.sort();
@@ -164,6 +158,16 @@ fn segments(name: &str) -> Result<(&str, &str)> {
 /// Whether one segment names a directory below the store root rather than a level above it.
 fn names_a_directory(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".."
+}
+
+/// Whether a store entry names a directory. A symlink is followed, as the rest of the store reads
+/// through one; a dangling link names nothing.
+fn is_directory(entry: &std::fs::DirEntry) -> Result<bool> {
+    match std::fs::metadata(entry.path()) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::io("inspect", entry.path(), error)),
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +289,103 @@ mod tests {
         store.discard_checkpoint("convaiinnovations/laya").unwrap();
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn checkpoints_are_listed_two_levels_below_the_store_root() {
+        let root = temp_dir("listing");
+        let store = Store::at(&root);
+        store
+            .record_provenance("convaiinnovations/laya", &provenance())
+            .unwrap();
+        // A directory that records no Provenance is not a Checkpoint, at either level, and neither
+        // is a file.
+        std::fs::create_dir_all(root.join("scratch/notes")).unwrap();
+        std::fs::create_dir_all(root.join("convaiinnovations/incomplete")).unwrap();
+        std::fs::write(root.join("convaiinnovations/README"), b"x").unwrap();
+
+        assert_eq!(
+            store.checkpoint_names().unwrap(),
+            vec!["convaiinnovations/laya".to_string()]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn checkpoints_are_listed_in_name_order() {
+        let root = temp_dir("order");
+        let store = Store::at(&root);
+        for name in ["z/zeta", "a/zulu", "a/alpha"] {
+            store.record_provenance(name, &provenance()).unwrap();
+        }
+
+        assert_eq!(
+            store.checkpoint_names().unwrap(),
+            vec![
+                "a/alpha".to_string(),
+                "a/zulu".to_string(),
+                "z/zeta".to_string()
+            ]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_store_root_holds_no_checkpoint() {
+        let root = temp_dir("missing").join("nowhere");
+
+        assert!(Store::at(&root).checkpoint_names().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_checkpoint_is_listed() {
+        let root = temp_dir("symlink");
+        let store = Store::at(&root);
+        // A Checkpoint kept on another volume, one level below the store root so the walk cannot
+        // reach it under its own name.
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::create_dir_all(root.join("convaiinnovations")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("convaiinnovations/laya"))
+            .unwrap();
+        store
+            .record_provenance("convaiinnovations/laya", &provenance())
+            .unwrap();
+
+        assert_eq!(
+            store.checkpoint_names().unwrap(),
+            vec!["convaiinnovations/laya".to_string()]
+        );
+        assert!(
+            root.join("elsewhere").join("provenance.json").is_file(),
+            "the record is written through the link"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_names_no_checkpoint() {
+        let root = temp_dir("dangling");
+        let store = Store::at(&root);
+        std::fs::create_dir_all(root.join("convaiinnovations")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), root.join("convaiinnovations/laya")).unwrap();
+
+        assert!(store.checkpoint_names().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn provenance() -> Provenance {
+        Provenance {
+            source: "convaiinnovations/laya".to_string(),
+            requested_revision: None,
+            resolved_revision: "1c5edc17a7acd8701df6fc341c0d179f1c62c982".to_string(),
+            files: Vec::new(),
+        }
     }
 
     fn temp_dir(case: &str) -> PathBuf {

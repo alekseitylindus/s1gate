@@ -59,17 +59,19 @@ pub enum Error {
         held: String,
         requested: String,
     },
+    // The three failures of verifying one Checkpoint file. Each `path` is the path the Provenance
+    // record holds, relative to the Checkpoint directory, which is how Pull names the same file.
     /// A file recorded in Provenance is absent from the local Checkpoint.
-    MissingStoredFile { path: PathBuf },
+    MissingStoredFile { path: String },
     /// A local Checkpoint file no longer has its recorded size.
     StoredSizeMismatch {
-        path: PathBuf,
+        path: String,
         expected: u64,
         actual: u64,
     },
     /// A local Checkpoint file no longer has its recorded checksum.
     StoredChecksumMismatch {
-        path: PathBuf,
+        path: String,
         expected: String,
         actual: String,
     },
@@ -87,6 +89,8 @@ pub enum Error {
         expected_shape: Vec<u64>,
         actual_shape: Vec<u64>,
     },
+    /// A bare `verify` found Checkpoints that failed, after verifying the rest of the store.
+    VerificationFailed { failed: usize, total: usize },
     Io {
         op: &'static str,
         path: PathBuf,
@@ -205,7 +209,7 @@ impl fmt::Display for Error {
                 "`{path}` hashes to {actual}, but the Model Source publishes {expected}"
             ),
             Error::MissingStoredFile { path } => {
-                write!(f, "Checkpoint file {} is missing", path.display())
+                write!(f, "Checkpoint file `{path}` is missing")
             }
             Error::StoredSizeMismatch {
                 path,
@@ -213,8 +217,7 @@ impl fmt::Display for Error {
                 actual,
             } => write!(
                 f,
-                "Checkpoint file {} is {actual} bytes, but Provenance records {expected}",
-                path.display()
+                "Checkpoint file `{path}` is {actual} bytes, but Provenance records {expected}"
             ),
             Error::StoredChecksumMismatch {
                 path,
@@ -222,11 +225,10 @@ impl fmt::Display for Error {
                 actual,
             } => write!(
                 f,
-                "Checkpoint file {} sha256 is {actual}, but Provenance records {expected}",
-                path.display()
+                "Checkpoint file `{path}` sha256 is {actual}, but Provenance records {expected}"
             ),
             Error::InvalidCheckpoint { path, message } => {
-                write!(f, "invalid Checkpoint file {}: {message}", path.display())
+                write!(f, "invalid Checkpoint file `{}`: {message}", path.display())
             }
             Error::MissingParameter { name } => {
                 write!(f, "missing parameter `{name}`")
@@ -244,6 +246,9 @@ impl fmt::Display for Error {
                 f,
                 "parameter `{name}` has dtype {actual_dtype} and shape {actual_shape:?}, expected {expected_dtype} and {expected_shape:?}"
             ),
+            Error::VerificationFailed { failed, total } => {
+                write!(f, "{failed} of {total} Checkpoints failed verification")
+            }
             Error::RevisionHeld {
                 name,
                 held,
