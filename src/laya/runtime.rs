@@ -838,6 +838,40 @@ mod tests {
         );
     }
 
+    /// A batch holding more than one Question Type is still one pass: each Question's Markers
+    /// score as they do alone, so a Type only reaches the Question that declares it.
+    #[test]
+    fn a_batch_of_mixed_question_types_is_judged_in_one_pass() {
+        let config = tiny_config();
+        let agent = tiny_agent();
+        let weights = tiny_weights();
+        let special = tiny_special();
+        let choice = || question(QuestionType::Choice, &[5, 6, 7], &[1, 2]);
+        let score = || question(QuestionType::Score, &[4, 5, 6, 7, 8], &[0, 1, 2, 3]);
+
+        let Forward {
+            logits: batched, ..
+        } = forward(&config, &agent, &weights, &[choice(), score()], &special).unwrap();
+        let Forward {
+            logits: choice_alone,
+            ..
+        } = forward(&config, &agent, &weights, &[choice()], &special).unwrap();
+        let Forward {
+            logits: score_alone,
+            ..
+        } = forward(&config, &agent, &weights, &[score()], &special).unwrap();
+
+        assert_eq!(batched.len(), 2, "one pass judges both Questions");
+        for (row, alone) in batched.iter().zip([&choice_alone[0], &score_alone[0]]) {
+            for (value, alone) in row.iter().zip(alone) {
+                assert!(
+                    (value - alone).abs() < 1e-5,
+                    "{value} is not {alone}: a neighbouring Question Type changed a score"
+                );
+            }
+        }
+    }
+
     /// Padding a Question into a wider batch must not move its Markers' scores, and a Marker slot
     /// no Option occupies must carry no score of its own.
     #[test]

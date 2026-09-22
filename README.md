@@ -96,23 +96,24 @@ A call is a State plus the Questions to judge against it:
 
 A Question is one of exactly three types. `choice` picks a labelled Option and reports the
 distribution over them; `score` reports the probability-weighted index over ordered Levels;
-`noul` reports the probability of the true side. Every Answer carries the Action signal beside it.
-Answers keep the caller's Question ids — the numbers below only show the shape of one:
+`noul` reports the probability of the true side. Every Answer carries the Action signal beside it,
+under `action.act_probability`. Answers keep the caller's Question ids — the numbers below only show
+the shape of one:
 
 ```json
 {
-  "model": "rl-agent",
+  "model": "laya-rl-agent",
   "answers": {
     "route": {
       "type": "choice",
-      "rl_agent": { "act_probability": 0.0123 },
+      "action": { "act_probability": 0.0123 },
       "choice": "billing",
       "probabilities": { "billing": 0.9988, "account": 0.0012 },
       "confidence": 0.9812
     },
     "urgency": {
       "type": "score",
-      "rl_agent": { "act_probability": 0.0123 },
+      "action": { "act_probability": 0.0123 },
       "score": 2.9142,
       "legend": { "0": "low", "1": "normal", "2": "high", "3": "immediate" },
       "probabilities": { "0": 0.0, "1": 0.0001, "2": 0.0856, "3": 0.9143 },
@@ -120,7 +121,7 @@ Answers keep the caller's Question ids — the numbers below only show the shape
     },
     "churn_risk": {
       "type": "noul",
-      "rl_agent": { "act_probability": 0.0123 },
+      "action": { "act_probability": 0.0123 },
       "noul": 0.7314
     }
   },

@@ -420,6 +420,29 @@ mod tests {
     }
 
     #[test]
+    fn score_levels_render_in_the_callers_order() {
+        let call = Call::from_bytes(br#"{"state":"x","questions":{"urgency":{"type":"score","instructions":"x","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
+        let (_, question) = call.questions.iter().next().unwrap();
+
+        let rendered = render_options(question);
+
+        assert_eq!(
+            rendered.options,
+            [
+                "level 0: immediate",
+                "level 1: low",
+                "level 2: normal",
+                "level 3: high"
+            ]
+        );
+        assert_eq!(
+            rendered.responses.levels(),
+            ["immediate", "low", "normal", "high"]
+        );
+        assert!(rendered.responses.labels().is_empty());
+    }
+
+    #[test]
     fn criteria_render_like_the_checkpoint_runtime() {
         let call = Call::from_bytes(br#"{"state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"array":[],"object":{},"yes":"ok","structured":{"flag":true}}},"score":{"type":"score","instructions":"x","criteria":["low","high"]},"noul":{"type":"noul","instructions":"x","criteria":{"false":false,"true":0}}}}"#).unwrap();
         let mut questions = call.questions.iter();

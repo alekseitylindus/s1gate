@@ -695,40 +695,109 @@ fn infer_runs_a_real_laya_checkpoint() {
         .expect("the test Model Store");
     std::os::unix::fs::symlink(&checkpoint, &model).expect("the checkpoint symlink");
 
-    let run = run_in_with_input(
-        &data_home,
-        &["infer", "--name", "convaiinnovations/laya"],
-        r#"{
+    let infer = |questions: serde_json::Value| -> serde_json::Value {
+        let request = serde_json::json!({
             "state": {"message": "The light is on."},
-            "questions": {
-                "lit": {
-                    "type": "choice",
-                    "instructions": "Is the light on?",
-                    "criteria": {"no": null, "yes": null}
-                }
-            }
-        }"#,
-    );
-    assert_eq!(run.code, 0, "{}", run.stderr);
+            "questions": questions,
+        });
+        let run = run_in_with_input(
+            &data_home,
+            &["infer", "--name", "convaiinnovations/laya"],
+            request.to_string(),
+        );
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        serde_json::from_str(&run.stdout).expect("inference returns JSON")
+    };
+    let lit = serde_json::json!({
+        "lit": {"type": "choice", "instructions": "Is the light on?", "criteria": {"no": null, "yes": null}}
+    });
+    let brightness = serde_json::json!({
+        "brightness": {"type": "score", "instructions": "How bright is the room?", "criteria": ["dark", "dim", "bright", "blinding"]}
+    });
+    let alone_choice = infer(lit.clone());
+    let alone_score = infer(brightness.clone());
+    let mut mixed_questions = lit;
+    mixed_questions
+        .as_object_mut()
+        .expect("an object of Questions")
+        .extend(
+            brightness
+                .as_object()
+                .expect("an object of Questions")
+                .clone(),
+        );
+    let mixed = infer(mixed_questions);
 
-    let result: serde_json::Value =
-        serde_json::from_str(&run.stdout).expect("inference returns JSON");
-    assert_eq!(result["model"], "rl-agent");
-    assert_eq!(result["answers"]["lit"]["type"], "choice");
-    let probabilities = result["answers"]["lit"]["probabilities"]
-        .as_object()
-        .expect("choice probabilities");
-    let total = probabilities
-        .values()
-        .map(|value| value.as_f64().expect("a numeric probability"))
-        .inspect(|value| assert!((0.0..=1.0).contains(value)))
-        .sum::<f64>();
-    assert!((total - 1.0).abs() < 0.001, "probabilities sum to {total}");
-    let action = result["answers"]["lit"]["rl_agent"]["act_probability"]
-        .as_f64()
-        .expect("a numeric action probability");
-    assert!((0.0..=1.0).contains(&action));
-    assert_eq!(result["usage"]["output_tokens"], 0);
+    assert_eq!(mixed["model"], "laya-rl-agent");
+
+    // The distribution an Answer reports: keyed by the names its Question Type reports, each a
+    // probability, together summing to one.
+    let distribution = |answer: &serde_json::Value, keys: &[&str]| {
+        let probabilities = answer["probabilities"]
+            .as_object()
+            .expect("the Answer's probabilities");
+        let names = probabilities.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(names, keys);
+        let total = probabilities
+            .values()
+            .map(|value| value.as_f64().expect("a numeric probability"))
+            .inspect(|value| assert!((0.0..=1.0).contains(value)))
+            .sum::<f64>();
+        assert!((total - 1.0).abs() < 0.001, "probabilities sum to {total}");
+    };
+
+    // A `choice` Answer: the distribution over its Options, and the Action beside it.
+    let answer = &mixed["answers"]["lit"];
+    assert_eq!(answer["type"], "choice");
+    assert_eq!(answer["choice"], alone_choice["answers"]["lit"]["choice"]);
+    distribution(answer, &["no", "yes"]);
+
+    // A `score` Answer: the caller's Levels in the caller's order, the calibrated distribution
+    // over them, the probability-weighted index, Confidence, and the Action.
+    let answer = &mixed["answers"]["brightness"];
+    assert_eq!(answer["type"], "score");
+    assert_eq!(
+        answer["legend"],
+        serde_json::json!({"0": "dark", "1": "dim", "2": "bright", "3": "blinding"})
+    );
+    distribution(answer, &["0", "1", "2", "3"]);
+    let weighted = answer["score"].as_f64().expect("a numeric score");
+    assert!((0.0..=3.0).contains(&weighted), "score {weighted}");
+    // Every reported number is rounded half-even to four decimal places.
+    for reported in [
+        &answer["score"],
+        &answer["confidence"],
+        &answer["action"]["act_probability"],
+    ] {
+        let number = reported.as_f64().expect("a numeric value");
+        assert_eq!(
+            number,
+            (number * 10_000.0).round() / 10_000.0,
+            "{reported} is not rounded to four decimal places"
+        );
+    }
+    for probability in [&answer["confidence"], &answer["action"]["act_probability"]] {
+        let number = probability.as_f64().expect("a numeric value");
+        assert!(
+            (0.0..=1.0).contains(&number),
+            "{probability} is not a probability"
+        );
+    }
+
+    // The whole call is one pass: its token total is what its Questions took together.
+    assert_eq!(
+        mixed["usage"]["input_tokens"].as_u64(),
+        Some(
+            alone_choice["usage"]["input_tokens"]
+                .as_u64()
+                .expect("tokens")
+                + alone_score["usage"]["input_tokens"]
+                    .as_u64()
+                    .expect("tokens")
+        ),
+        "usage.input_tokens is the whole call's"
+    );
+    assert_eq!(mixed["usage"]["output_tokens"], 0);
 }
 
 struct Run {
