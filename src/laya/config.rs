@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use mlx_rs::error::Exception;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -106,22 +105,25 @@ pub(super) struct AgentConfig {
     pub(super) head_layers: usize,
     pub(super) temperature: Vec<f32>,
     pub(super) temperature_by_options: BTreeMap<String, f32>,
-    pub(super) act_costs: BTreeMap<String, Value>,
 }
 
 impl EncoderConfig {
-    pub(super) fn layer_type(&self, index: usize) -> std::result::Result<AttentionType, Exception> {
+    pub(super) fn layer_type(&self, index: usize) -> Result<AttentionType> {
         self.layer_types
             .get(index)
             .copied()
-            .ok_or_else(|| Exception::custom(format!("missing attention type for layer {index}")))
+            .ok_or_else(|| Error::Inference {
+                message: format!("missing attention type for layer {index}"),
+            })
     }
 
-    pub(super) fn rope_base(&self, kind: AttentionType) -> std::result::Result<f32, Exception> {
+    pub(super) fn rope_base(&self, kind: AttentionType) -> Result<f32> {
         self.rope_parameters
             .get(&kind)
             .map(|parameters| parameters.rope_theta)
-            .ok_or_else(|| Exception::custom("missing RoPE parameters for attention type"))
+            .ok_or_else(|| Error::Inference {
+                message: "missing RoPE parameters for attention type".to_string(),
+            })
     }
 }
 
@@ -180,11 +182,10 @@ pub(super) fn validate_config(encoder: &EncoderConfig, agent: &AgentConfig) -> R
             message: "encoder normalization or RoPE configuration is invalid".to_string(),
         });
     }
-    if i32::try_from(encoder.hidden_size).is_err()
-        || i32::try_from(encoder.max_position_embeddings).is_err()
-    {
+    // Rotary embeddings rotate the two halves of a head against each other.
+    if (encoder.hidden_size / encoder.num_attention_heads) % 2 != 0 {
         return Err(Error::Inference {
-            message: "encoder dimensions exceed MLX limits".to_string(),
+            message: "attention head width must be even for rotary embeddings".to_string(),
         });
     }
     if !(4 < agent.head_max_len
@@ -224,6 +225,16 @@ fn parse_config<T: for<'de> Deserialize<'de>>(
         path: path.to_path_buf(),
         message: format!("configuration is invalid: {error}"),
     })
+}
+
+#[cfg(test)]
+impl EncoderConfig {
+    /// An encoder configuration from JSON, parsed exactly as a Checkpoint's
+    /// `encoder/config.json` is, so a runtime test runs against a configuration the Checkpoint
+    /// rules accept rather than one the test made up.
+    pub(super) fn from_json(bytes: &[u8]) -> Result<Self> {
+        parse_config(Path::new("<test>"), bytes, ENCODER_KEYS)
+    }
 }
 
 #[cfg(test)]

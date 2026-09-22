@@ -270,7 +270,6 @@ mod tests {
             head_layers: 2,
             temperature: vec![1.0; 3],
             temperature_by_options: BTreeMap::new(),
-            act_costs: BTreeMap::new(),
         };
         let result = format_result(
             &call,

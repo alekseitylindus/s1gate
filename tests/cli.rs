@@ -675,7 +675,7 @@ fn infer_escapes_a_duplicated_question_id_it_rejects() {
 }
 
 #[test]
-#[ignore = "requires a pulled MLX checkpoint in LAYA_MODEL_DIR and the Metal toolchain"]
+#[ignore = "requires a pulled Checkpoint in LAYA_MODEL_DIR"]
 fn infer_runs_a_real_laya_checkpoint() {
     let checkpoint = std::env::var_os("LAYA_MODEL_DIR")
         .map(std::path::PathBuf::from)

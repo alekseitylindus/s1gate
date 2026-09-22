@@ -1,7 +1,7 @@
 //! The native Laya backend.
 //!
 //! This module wires checkpoint resources into the Laya pipeline. The
-//! protocol, checkpoint configuration, MLX runtime, and response rendering
+//! protocol, checkpoint configuration, Candle runtime, and response rendering
 //! live in focused internal modules so they can evolve independently.
 
 mod config;
@@ -25,10 +25,10 @@ use runtime::{forward, load_weights};
 
 #[derive(Debug)]
 pub(super) struct SpecialTokens {
-    pub(super) cls: i32,
-    pub(super) sep: i32,
-    pub(super) mask: i32,
-    pub(super) pad: i32,
+    pub(super) cls: u32,
+    pub(super) sep: u32,
+    pub(super) mask: u32,
+    pub(super) pad: u32,
     pub(super) mask_text: String,
 }
 

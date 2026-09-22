@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+candle-core = { version = "=0.11.0", features = ["accelerate"] }
+candle-nn = { version = "=0.11.0", features = ["accelerate"] }
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
-mlx-rs = { version = "=0.32.0" }
 tokenizers = "0.23.2"
 
 [dev-dependencies]

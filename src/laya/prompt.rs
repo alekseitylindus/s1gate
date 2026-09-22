@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::Path;
 
 use serde::Serialize;
@@ -20,7 +20,7 @@ const MAX_OPTION_TOKENS: usize = 48;
 
 #[derive(Debug)]
 pub(super) struct Sequence {
-    pub(super) ids: Vec<i32>,
+    pub(super) ids: Vec<u32>,
     pub(super) markers: Vec<usize>,
 }
 
@@ -35,7 +35,7 @@ pub(super) struct Prepared {
 
 pub(super) fn special_tokens(directory: &Path, tokenizer: &Tokenizer) -> Result<SpecialTokens> {
     let config: Value = read_json(&directory.join("tokenizer/tokenizer_config.json"))?;
-    let token = |name: &str| -> Result<(String, i32)> {
+    let token = |name: &str| -> Result<(String, u32)> {
         let value = config.get(name).ok_or_else(|| Error::Inference {
             message: format!("tokenizer config is missing {name}"),
         })?;
@@ -56,9 +56,6 @@ pub(super) fn special_tokens(directory: &Path, tokenizer: &Tokenizer) -> Result<
             .ok_or_else(|| Error::Inference {
                 message: format!("tokenizer has no {name} token `{text}`"),
             })?;
-        let id = i32::try_from(id).map_err(|_| Error::Inference {
-            message: format!("tokenizer id for {name} is too large"),
-        })?;
         Ok((text, id))
     };
     let (mask_text, mask) = token("mask_token")?;
@@ -76,21 +73,13 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).map_err(|error| Error::json(path.display().to_string(), error))
 }
 
-fn encode(tokenizer: &Tokenizer, text: &str) -> Result<Vec<i32>> {
+fn encode(tokenizer: &Tokenizer, text: &str) -> Result<Vec<u32>> {
     let encoding = tokenizer
         .encode(text, false)
         .map_err(|error| Error::Inference {
             message: format!("tokenizing prompt: {error}"),
         })?;
-    encoding
-        .get_ids()
-        .iter()
-        .map(|id| {
-            i32::try_from(*id).map_err(|_| Error::Inference {
-                message: "tokenizer id is too large".to_string(),
-            })
-        })
-        .collect()
+    Ok(encoding.get_ids().to_vec())
 }
 
 fn render_value(value: &Value) -> String {
