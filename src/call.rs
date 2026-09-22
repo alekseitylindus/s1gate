@@ -13,6 +13,8 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
+    /// The Model Identifier for the Backend that judges the Questions in this call.
+    pub model: String,
     /// The evidence every Question of the call is judged against.
     pub state: Value,
     /// The Questions to judge, each under its caller-chosen id.
@@ -321,6 +323,7 @@ mod tests {
     #[test]
     fn caller_question_ids_and_option_order_are_preserved() {
         let input = r#"{
+                "model": "convaiinnovations/laya",
                 "state": "evidence",
                 "questions": {
                     "first question": {

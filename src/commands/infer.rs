@@ -2,24 +2,16 @@
 
 use std::io::{self, Read, Write};
 
-use super::checkpoint_name;
 use crate::call::Call;
 use crate::error::{Error, Result};
 use crate::laya;
+use crate::model_source;
 use crate::store::Store;
 
-/// What `infer` was asked for.
-#[derive(clap::Args)]
-pub struct Args {
-    /// The Model Source whose local Checkpoint should judge the call
-    #[arg(long, value_name = "MODEL")]
-    pub name: String,
-}
-
-pub fn run(args: Args) -> Result<()> {
+pub fn run() -> Result<()> {
     // Judging the call is a Backend's job; this command owns the input and error contract alone.
     let call = read_call()?;
-    let source = checkpoint_name(&args.name)?;
+    let source = model_source::lookup_identifier(&call.model)?;
     let name = source.repo;
     let store = Store::from_env()?;
     if store.provenance(name)?.is_none() {

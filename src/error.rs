@@ -15,6 +15,11 @@ pub enum Error {
         /// The Model Source that was asked for.
         requested: String,
     },
+    /// The Model Identifier is not supported by `infer`.
+    UnsupportedModelIdentifier {
+        /// The Model Identifier that was rejected.
+        requested: String,
+    },
     /// The Checkpoint name is not usable as a single directory name.
     InvalidName {
         /// The Checkpoint name that was rejected.
@@ -224,6 +229,7 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::UnsupportedSource { .. }
+            | Self::UnsupportedModelIdentifier { .. }
             | Self::InvalidName { .. }
             | Self::InvalidCall { .. } => 2,
             Self::NoStoreRoot
@@ -256,16 +262,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedSource { requested } => {
-                write!(f, "unsupported Model Source `{requested}` (supported: ")?;
-                let mut first = true;
-                for source in crate::model_source::supported() {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{source}")?;
-                    first = false;
-                }
-                write!(f, ")")
+                write_unsupported_name(f, "Model Source", requested)
+            }
+            Self::UnsupportedModelIdentifier { requested } => {
+                write_unsupported_name(f, "Model Identifier", requested)
             }
             Self::InvalidName { name } => write!(
                 f,
@@ -386,6 +386,7 @@ impl std::error::Error for Error {
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
             Self::UnsupportedSource { .. }
+            | Self::UnsupportedModelIdentifier { .. }
             | Self::InvalidName { .. }
             | Self::NoStoreRoot
             | Self::RevisionNotFound { .. }
@@ -410,4 +411,17 @@ impl std::error::Error for Error {
             | Self::VerificationFailed { .. } => None,
         }
     }
+}
+
+fn write_unsupported_name(f: &mut fmt::Formatter<'_>, kind: &str, requested: &str) -> fmt::Result {
+    write!(f, "unsupported {kind} `{requested}` (supported: ")?;
+    let mut first = true;
+    for source in crate::model_source::supported() {
+        if !first {
+            write!(f, ", ")?;
+        }
+        write!(f, "{source}")?;
+        first = false;
+    }
+    write!(f, ")")
 }

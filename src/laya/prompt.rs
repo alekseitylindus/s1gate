@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn score_levels_render_in_the_callers_order() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"urgency":{"type":"score","instructions":"x","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"urgency":{"type":"score","instructions":"x","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
         let (_, question) = call.questions.iter().next().unwrap();
 
         let rendered = render(question);
@@ -397,7 +397,7 @@ mod tests {
     /// prompt before it was fixed.
     #[test]
     fn criteria_render_their_descriptions() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"list":["a",2],"object":{"flag":true,"\u043a\u043b\u044e\u0447":"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435"},"yes":"ok"}},"score":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"list":["a",2],"object":{"flag":true,"\u043a\u043b\u044e\u0447":"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435"},"yes":"ok"}},"score":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
         let mut questions = call.questions.iter();
         let (_, choice) = questions.next().unwrap();
         let (_, score) = questions.next().unwrap();
@@ -423,7 +423,7 @@ mod tests {
     /// carries neither probabilities nor a legend.
     #[test]
     fn noul_renders_the_false_option_then_the_true_one() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "described":{"type":"noul","instructions":"x","criteria":{"true":"yes","false":"no"}},
             "falsy":{"type":"noul","instructions":"x","criteria":{"false":false,"true":0}},
             "structured":{"type":"noul","instructions":"x","criteria":{"false":{"reason":"stays"},"true":["leaves","churns"]}},

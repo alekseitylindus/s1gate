@@ -60,17 +60,19 @@ verified convaiinnovations/laya@1c5edc17a7acd8701df6fc341c0d179f1c62c982 (5 file
 
 ### `s1gate infer`
 
-Judge exactly one System One Call, read as JSON on stdin, against a stored Checkpoint. The Answers
-are written as JSON on stdout:
+Judge exactly one System One Call, read as JSON on stdin, against a stored Checkpoint. Its `model`
+field is the Model Identifier; currently it selects the supported local Model Source, and the
+response repeats that identifier. The Answers are written as JSON on stdout:
 
 ```console
-$ s1gate infer --name convaiinnovations/laya < call.json
+$ s1gate infer < call.json
 ```
 
 A call is a State plus the Questions to judge against it:
 
 ```json
 {
+  "model": "convaiinnovations/laya",
   "state": "Ticket #4821: the customer was charged twice for order A-5512.",
   "questions": {
     "route": {

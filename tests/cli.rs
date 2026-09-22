@@ -304,17 +304,25 @@ fn checkpoint_root(data_home: &TempDir) -> std::path::PathBuf {
 }
 
 #[test]
-fn infer_requires_a_model_source_name() {
+fn infer_requires_a_model_identifier_in_the_call() {
     let run = run_with_input(&["infer"], "{}");
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("--name"), "{}", run.stderr);
+    assert!(run.stderr.contains("model"), "{}", run.stderr);
+}
+
+#[test]
+fn infer_has_no_model_name_flag() {
+    let run = run(&["infer", "--help"]);
+
+    assert_eq!(run.code, 0);
+    assert!(!run.stdout.contains("--name"), "{}", run.stdout);
 }
 
 #[test]
 fn infer_rejects_invalid_json_without_writing_stdout() {
-    let run = run_with_input(&["infer", "--name", "convaiinnovations/laya"], "not JSON");
+    let run = run_with_input(&["infer"], "not JSON");
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
@@ -327,10 +335,7 @@ fn infer_rejects_invalid_json_without_writing_stdout() {
 
 #[test]
 fn infer_rejects_trailing_json() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
-        r#"{"state":"x","questions":{}} {}"#,
-    );
+    let run = run_infer_with_laya_model_identifier(r#"{"state":"x","questions":{}} {}"#);
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
@@ -339,8 +344,7 @@ fn infer_rejects_trailing_json() {
 
 #[test]
 fn infer_rejects_a_choice_with_one_option_before_loading_the_checkpoint() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -362,8 +366,7 @@ fn infer_rejects_a_choice_with_one_option_before_loading_the_checkpoint() {
 
 #[test]
 fn infer_rejects_duplicate_choice_options() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -383,23 +386,21 @@ fn infer_rejects_duplicate_choice_options() {
 
 #[test]
 fn infer_rejects_an_uncurated_model_source_before_locating_the_store() {
-    let run = run_with_input(
-        &["infer", "--name", "some/other-model"],
-        r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+    let run = run_infer_with_laya_model_identifier(
+        r#"{"model":"some/other-model","state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
     );
 
     assert_eq!(run.code, 2);
     let stderr = run.stderr;
     assert!(
-        stderr.contains("unsupported Model Source `some/other-model`"),
+        stderr.contains("unsupported Model Identifier `some/other-model`"),
         "{stderr}"
     );
 }
 
 #[test]
 fn infer_rejects_a_score_with_choice_criteria() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -423,8 +424,7 @@ fn infer_rejects_a_score_with_choice_criteria() {
 
 #[test]
 fn infer_rejects_a_noul_with_only_one_option() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -444,8 +444,7 @@ fn infer_rejects_a_noul_with_only_one_option() {
 
 #[test]
 fn infer_rejects_an_unknown_question_type() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -464,8 +463,7 @@ fn infer_rejects_an_unknown_question_type() {
 
 #[test]
 fn infer_rejects_duplicate_question_ids() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -486,8 +484,7 @@ fn infer_rejects_duplicate_question_ids() {
 
 #[test]
 fn infer_rejects_an_empty_question_id() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -503,8 +500,7 @@ fn infer_rejects_an_empty_question_id() {
 
 #[test]
 fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": {"body": "x"},
             "questions": {
@@ -526,11 +522,23 @@ fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
 }
 
 #[test]
-fn infer_rejects_input_that_is_not_utf8() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
-        b"{\"state\":\"\xff\"}",
+fn infer_selects_the_stored_checkpoint_by_the_calls_model() {
+    let data_home = TempDir::new("cli-infer-model");
+    fixture::write_inferable(&checkpoint_root(&data_home));
+    let run = run_in_with_input(
+        &data_home,
+        &["infer"],
+        r#"{"model":"convaiinnovations/laya","state":"x","questions":{"risk":{"type":"noul","instructions":"Is it risky?"}}}"#,
     );
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("a response");
+    assert_eq!(response["model"], "convaiinnovations/laya");
+}
+
+#[test]
+fn infer_rejects_input_that_is_not_utf8() {
+    let run = run_infer_with_laya_model_identifier(b"{\"state\":\"\xff\"}");
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
@@ -540,7 +548,7 @@ fn infer_rejects_input_that_is_not_utf8() {
 
 #[test]
 fn infer_names_the_call_once_in_a_diagnostic() {
-    let run = run_with_input(&["infer", "--name", "convaiinnovations/laya"], "not JSON");
+    let run = run_with_input(&["infer"], "not JSON");
 
     assert_eq!(run.code, 2);
     assert_eq!(
@@ -553,8 +561,7 @@ fn infer_names_the_call_once_in_a_diagnostic() {
 
 #[test]
 fn infer_rejects_a_score_level_that_is_not_a_string() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -575,8 +582,7 @@ fn infer_rejects_a_score_level_that_is_not_a_string() {
 
 #[test]
 fn infer_rejects_duplicate_score_levels() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -597,8 +603,7 @@ fn infer_rejects_duplicate_score_levels() {
 
 #[test]
 fn infer_names_the_question_whose_option_name_is_unusable() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -628,8 +633,7 @@ fn infer_names_the_question_whose_option_name_is_unusable() {
 
 #[test]
 fn infer_names_the_question_whose_options_repeat() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -650,8 +654,7 @@ fn infer_names_the_question_whose_options_repeat() {
 
 #[test]
 fn infer_escapes_the_question_id_it_rejects() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{"state":"x","questions":{"a\u001b[2Kb":{"type":"noul","instructions":"x"}}}"#,
     );
 
@@ -662,8 +665,7 @@ fn infer_escapes_the_question_id_it_rejects() {
 
 #[test]
 fn infer_escapes_a_duplicated_question_id_it_rejects() {
-    let run = run_with_input(
-        &["infer", "--name", "convaiinnovations/laya"],
+    let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
@@ -697,14 +699,11 @@ fn infer_runs_a_real_laya_checkpoint() {
 
     let infer = |questions: serde_json::Value| -> serde_json::Value {
         let request = serde_json::json!({
+            "model": "convaiinnovations/laya",
             "state": {"message": "The light is on."},
             "questions": questions,
         });
-        let run = run_in_with_input(
-            &data_home,
-            &["infer", "--name", "convaiinnovations/laya"],
-            request.to_string(),
-        );
+        let run = run_in_with_input(&data_home, &["infer"], request.to_string());
         assert_eq!(run.code, 0, "{}", run.stderr);
         serde_json::from_str(&run.stdout).expect("inference returns JSON")
     };
@@ -866,6 +865,17 @@ fn run_in(data_home: &TempDir, args: &[&str]) -> Run {
 fn run_with_input(args: &[&str], input: impl AsRef<[u8]>) -> Run {
     let data_home = TempDir::new("cli-infer");
     run_in_with_input(&data_home, args, input)
+}
+
+fn run_infer_with_laya_model_identifier(input: impl AsRef<[u8]>) -> Run {
+    let input = input.as_ref();
+    let mut call = br#"{"model":"convaiinnovations/laya","#.to_vec();
+    if input.starts_with(b"{") && !input.starts_with(br#"{"model""#) {
+        call.extend_from_slice(&input[1..]);
+    } else {
+        call = input.to_vec();
+    }
+    run_with_input(&["infer"], call)
 }
 
 fn run_in_with_input(data_home: &TempDir, args: &[&str], input: impl AsRef<[u8]>) -> Run {

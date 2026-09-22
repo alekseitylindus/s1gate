@@ -48,9 +48,6 @@ pub fn write_with(
     agent: &str,
     header: BTreeMap<String, Value>,
 ) -> PathBuf {
-    let directory = root.join(NAME);
-    fs::create_dir_all(directory.join("encoder")).expect("the Checkpoint directories");
-    fs::create_dir_all(directory.join("tokenizer")).expect("the Checkpoint directories");
     let files = [
         ("model.safetensors", safetensors(header)),
         ("rl_agent_config.json", agent.as_bytes().to_vec()),
@@ -58,6 +55,33 @@ pub fn write_with(
         ("tokenizer/tokenizer.json", b"{}".to_vec()),
         ("tokenizer/tokenizer_config.json", b"{}".to_vec()),
     ];
+    write_files(root, &files)
+}
+
+/// Write a small Checkpoint that the native Backend can run end to end.
+pub fn write_inferable(root: &Path) -> PathBuf {
+    const ENCODER: &str = r#"{"vocab_size":5,"hidden_size":64,"intermediate_size":2,"num_hidden_layers":1,"num_attention_heads":1,"local_attention":1,"max_position_embeddings":64,"layer_types":["full_attention"],"rope_parameters":{"full_attention":{"rope_type":"default","rope_theta":160000.0},"sliding_attention":{"rope_type":"default","rope_theta":10000.0}},"norm_eps":0.00001}"#;
+    const AGENT: &str = r#"{"max_len":48,"head_max_len":32,"head_layers":1,"act_costs":{"escalate":0.5},"temperature":[1.0,1.0,1.0],"temperature_by_options":{}}"#;
+    const TOKENIZER: &str = r##"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[{"id":1,"content":"[CLS]","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},{"id":2,"content":"[SEP]","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},{"id":3,"content":"[MASK]","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},{"id":4,"content":"[PAD]","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"[CLS]":1,"[SEP]":2,"[MASK]":3,"[PAD]":4},"unk_token":"[UNK]"}}"##;
+    const TOKENIZER_CONFIG: &str =
+        r#"{"cls_token":"[CLS]","sep_token":"[SEP]","mask_token":"[MASK]","pad_token":"[PAD]"}"#;
+    let files = [
+        ("model.safetensors", safetensors(inferable_header())),
+        ("rl_agent_config.json", AGENT.as_bytes().to_vec()),
+        ("encoder/config.json", ENCODER.as_bytes().to_vec()),
+        ("tokenizer/tokenizer.json", TOKENIZER.as_bytes().to_vec()),
+        (
+            "tokenizer/tokenizer_config.json",
+            TOKENIZER_CONFIG.as_bytes().to_vec(),
+        ),
+    ];
+    write_files(root, &files)
+}
+
+fn write_files(root: &Path, files: &[(&str, Vec<u8>)]) -> PathBuf {
+    let directory = root.join(NAME);
+    fs::create_dir_all(directory.join("encoder")).expect("the Checkpoint directories");
+    fs::create_dir_all(directory.join("tokenizer")).expect("the Checkpoint directories");
     let records = files
         .iter()
         .map(|(path, body)| FileRecord {
@@ -80,8 +104,70 @@ pub fn write_with(
         }
         .to_json(),
     )
-    .expect("the Provenance record");
+    .expect("a Provenance record");
     directory
+}
+
+fn inferable_header() -> BTreeMap<String, Value> {
+    const HIDDEN: u64 = 64;
+    const INTERMEDIATE: u64 = 2;
+    let mut header = BTreeMap::new();
+    header.insert("temperature".to_string(), tensor("F32", &[3]));
+    let mut add = |name: &str, shape: &[u64]| {
+        header.insert(name.to_string(), tensor("F16", shape));
+    };
+    for (name, shape) in [
+        ("encoder.embeddings.norm.weight", vec![HIDDEN]),
+        ("encoder.embeddings.tok_embeddings.weight", vec![5, HIDDEN]),
+        ("encoder.final_norm.weight", vec![HIDDEN]),
+        ("encoder.layers.0.attn.Wo.weight", vec![HIDDEN, HIDDEN]),
+        (
+            "encoder.layers.0.attn.Wqkv.weight",
+            vec![3 * HIDDEN, HIDDEN],
+        ),
+        (
+            "encoder.layers.0.mlp.Wi.weight",
+            vec![2 * INTERMEDIATE, HIDDEN],
+        ),
+        ("encoder.layers.0.mlp.Wo.weight", vec![HIDDEN, INTERMEDIATE]),
+        ("encoder.layers.0.mlp_norm.weight", vec![HIDDEN]),
+        ("type_emb.weight", vec![3, HIDDEN]),
+        ("scorer.0.weight", vec![HIDDEN]),
+        ("scorer.0.bias", vec![HIDDEN]),
+        ("scorer.1.weight", vec![HIDDEN, HIDDEN]),
+        ("scorer.1.bias", vec![HIDDEN]),
+        ("scorer.3.weight", vec![1, HIDDEN]),
+        ("scorer.3.bias", vec![1]),
+        ("act_head.0.weight", vec![256, HIDDEN + 4]),
+        ("act_head.0.bias", vec![256]),
+        ("act_head.2.weight", vec![2, 256]),
+        ("act_head.2.bias", vec![2]),
+    ] {
+        add(name, &shape);
+    }
+    for (name, shape) in [
+        ("head.layers.0.linear1.weight", vec![4 * HIDDEN, HIDDEN]),
+        ("head.layers.0.linear1.bias", vec![4 * HIDDEN]),
+        ("head.layers.0.linear2.weight", vec![HIDDEN, 4 * HIDDEN]),
+        ("head.layers.0.linear2.bias", vec![HIDDEN]),
+        ("head.layers.0.norm1.weight", vec![HIDDEN]),
+        ("head.layers.0.norm1.bias", vec![HIDDEN]),
+        ("head.layers.0.norm2.weight", vec![HIDDEN]),
+        ("head.layers.0.norm2.bias", vec![HIDDEN]),
+        (
+            "head.layers.0.self_attn.in_proj_weight",
+            vec![3 * HIDDEN, HIDDEN],
+        ),
+        ("head.layers.0.self_attn.in_proj_bias", vec![3 * HIDDEN]),
+        (
+            "head.layers.0.self_attn.out_proj.weight",
+            vec![HIDDEN, HIDDEN],
+        ),
+        ("head.layers.0.self_attn.out_proj.bias", vec![HIDDEN]),
+    ] {
+        add(name, &shape);
+    }
+    header
 }
 
 /// The header of a Checkpoint with `ENCODER_CONFIG` and `AGENT_CONFIG`.

@@ -4,7 +4,6 @@ use serde_json::{Map, Value};
 
 use crate::call::{Call, QuestionType};
 use crate::error::{Error, Result};
-use crate::model_source::ModelSource;
 
 use super::config::AgentConfig;
 use super::prompt::Prepared;
@@ -78,7 +77,6 @@ fn confidence(probabilities: &[f32]) -> f32 {
 /// probability is missing.
 pub(super) fn format_result(
     call: &Call,
-    source: &ModelSource,
     agent: &AgentConfig,
     prepared: &[Prepared],
     logits: Vec<Vec<f32>>,
@@ -218,7 +216,7 @@ pub(super) fn format_result(
         .map(|item| item.sequence.ids.len())
         .sum::<usize>();
     Ok(serde_json::json!({
-        "model": source.repo, "answers": answers,
+        "model": call.model, "answers": answers,
         "usage": { "input_tokens": input_tokens, "output_tokens": 0 }
     }))
 }
@@ -228,7 +226,6 @@ mod tests {
     use super::*;
     use crate::call::Call;
     use crate::laya::prompt::{Prepared, Responses, Sequence};
-    use crate::model_source::LAYA;
 
     /// The per-Question-Type fallback temperatures a Checkpoint agent carries in
     /// `rl_agent_config.json`, chosen distinct so a test tells them apart.
@@ -312,14 +309,13 @@ mod tests {
 
     #[test]
     fn answers_match_the_checkpoint_public_shape() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":["no","yes"]},"noul":{"type":"noul","instructions":"x"}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":["no","yes"]},"noul":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let prepared = vec![
             prepared(QuestionType::Choice, &["no", "yes"], 3),
             prepared(QuestionType::Noul, &["false", "true"], 3),
         ];
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[]),
             &prepared,
             vec![vec![0.0, 0.0], vec![0.0, 0.0]],
@@ -344,7 +340,7 @@ mod tests {
     #[test]
     fn a_noul_answer_reports_the_stronger_sides_probability() {
         let call = Call::from_bytes(
-            br#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+            br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
         )
         .unwrap();
         // `temperature` falls back to 1.1 for `noul`, so a logit of `ln(3) * 1.1` leaves one side
@@ -357,7 +353,6 @@ mod tests {
         ] {
             let result = format_result(
                 &call,
-                &LAYA,
                 &agent(&[]),
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![logits],
@@ -380,13 +375,12 @@ mod tests {
     #[test]
     fn a_noul_question_takes_its_own_two_option_calibration_temperature() {
         let call = Call::from_bytes(
-            br#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+            br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
         )
         .unwrap();
         let judge = |agent: &AgentConfig| {
             format_result(
                 &call,
-                &LAYA,
                 agent,
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![vec![0.0, -2.0]],
@@ -416,7 +410,7 @@ mod tests {
     /// of six to ten Options would otherwise take the per-Type fallback in silence.
     #[test]
     fn calibration_covers_the_six_to_ten_bucket() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "five":{"type":"score","instructions":"x","criteria":["a","b","c","d","e"]},
             "six":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f"]},
             "ten":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i","j"]},
@@ -433,7 +427,6 @@ mod tests {
         ];
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[("score:3-5", 0.25), ("score:6-10", 2.0), ("score:11+", 4.0)]),
             &prepared,
             vec![leading(5), leading(6), leading(10), leading(11)],
@@ -452,10 +445,9 @@ mod tests {
     /// calibrated distribution over that order, its Confidence and the Action.
     #[test]
     fn a_score_answer_reports_the_callers_levels_in_order() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"urgency":{"type":"score","instructions":"How urgent?","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"urgency":{"type":"score","instructions":"How urgent?","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[]),
             &[prepared(
                 QuestionType::Score,
@@ -489,7 +481,7 @@ mod tests {
     /// Type and option count, falling back to `temperature` for that Type.
     #[test]
     fn calibration_follows_the_question_type_and_option_count() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "score2":{"type":"score","instructions":"x","criteria":["a","b"]},
             "choice2":{"type":"choice","instructions":"x","criteria":["a","b"]},
             "score4":{"type":"score","instructions":"x","criteria":["a","b","c","d"]},
@@ -510,7 +502,6 @@ mod tests {
         ];
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[("score:2", 2.0), ("choice:2", 0.5), ("score:3-5", 0.25)]),
             &prepared,
             vec![
@@ -543,10 +534,9 @@ mod tests {
     /// of `0.0001` scales the logits by a thousandth, not by a ten-thousandth.
     #[test]
     fn a_calibration_temperature_below_the_clamp_is_floored() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[("score:2", 0.000_1)]),
             &[prepared(QuestionType::Score, &["low", "high"], 3)],
             vec![vec![0.000_5, 0.0]],
@@ -562,7 +552,7 @@ mod tests {
     /// probabilities first would move it to 4.5.
     #[test]
     fn a_score_is_the_expectation_over_unrounded_probabilities() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["L1","L2","L3","L4","L5","L6","L7","L8","L9","L10","L11"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["L1","L2","L3","L4","L5","L6","L7","L8","L9","L10","L11"]}}}"#).unwrap();
         // Eleven Levels whose last carries 0.00002 of the calibrated mass and whose other ten
         // carry 0.099998 each, at a calibration temperature of one: the logit that says so is the
         // `z` with `e^z = 0.00002 * 10 / (1 - 0.00002)`.
@@ -573,7 +563,6 @@ mod tests {
         ];
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[("score:11+", 1.0)]),
             &[prepared(QuestionType::Score, &names, 3)],
             vec![logits],
@@ -590,10 +579,9 @@ mod tests {
     /// distribution that sums to one.
     #[test]
     fn rounded_probabilities_are_not_renormalized() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"q":{"type":"choice","instructions":"x","criteria":["a","b","c"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"choice","instructions":"x","criteria":["a","b","c"]}}}"#).unwrap();
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[]),
             &[prepared(QuestionType::Choice, &["a", "b", "c"], 3)],
             vec![vec![0.0; 3]],
@@ -615,13 +603,12 @@ mod tests {
     /// took.
     #[test]
     fn a_mixed_call_reports_one_whole_call_token_total() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "route":{"type":"choice","instructions":"x","criteria":["billing","shipping","account"]},
             "urgency":{"type":"score","instructions":"x","criteria":["low","high","normal"]},
             "churn_risk":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let result = format_result(
             &call,
-            &LAYA,
             &agent(&[]),
             &[
                 prepared(QuestionType::Choice, &["billing", "shipping", "account"], 4),

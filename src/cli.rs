@@ -26,7 +26,7 @@ enum Command {
     /// the Checkpoint the Model Store already holds for it.
     Pull(commands::pull::Args),
     /// Judge one System One Call from JSON on stdin without network access
-    Infer(commands::infer::Args),
+    Infer,
     /// Verify stored Checkpoints against their Provenance without network access
     Verify(commands::verify::Args),
 }
@@ -41,7 +41,7 @@ enum Command {
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Pull(args) => commands::pull::run(args),
-        Command::Infer(args) => commands::infer::run(args),
+        Command::Infer => commands::infer::run(),
         Command::Verify(args) => commands::verify::run(args),
     }
 }

@@ -39,12 +39,20 @@ pub(crate) fn supported() -> impl Iterator<Item = &'static str> {
 ///
 /// [`Error::UnsupportedSource`], exit code 2, when `repo` is not one of the curated repositories.
 pub fn lookup(repo: &str) -> Result<&'static ModelSource> {
-    SOURCES
-        .iter()
-        .find(|source| source.repo == repo)
-        .ok_or_else(|| Error::UnsupportedSource {
-            requested: repo.to_string(),
-        })
+    curated(repo).ok_or_else(|| Error::UnsupportedSource {
+        requested: repo.to_string(),
+    })
+}
+
+/// The curated Model Source named by an `infer` Model Identifier.
+pub(crate) fn lookup_identifier(identifier: &str) -> Result<&'static ModelSource> {
+    curated(identifier).ok_or_else(|| Error::UnsupportedModelIdentifier {
+        requested: identifier.to_string(),
+    })
+}
+
+fn curated(repo: &str) -> Option<&'static ModelSource> {
+    SOURCES.iter().find(|source| source.repo == repo)
 }
 
 #[cfg(test)]
@@ -86,6 +94,17 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "unsupported Model Source `some/other-model` (supported: convaiinnovations/laya)"
+        );
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn unsupported_identifier_is_named_as_such() {
+        let error = lookup_identifier("proxy/other").expect_err("the identifier is not curated");
+        assert!(matches!(error, Error::UnsupportedModelIdentifier { .. }));
+        assert_eq!(
+            error.to_string(),
+            "unsupported Model Identifier `proxy/other` (supported: convaiinnovations/laya)"
         );
         assert_eq!(error.exit_code(), 2);
     }

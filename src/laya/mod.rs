@@ -55,5 +55,5 @@ pub fn run(store: &Store, source: &ModelSource, call: &Call) -> Result<Value> {
     let prepared = prepare(call, &tokenizer, &special, &agent)?;
     let weights = load_weights(&directory.join("model.safetensors"))?;
     let Forward { logits, actions } = forward(&encoder, &agent, &weights, &prepared, &special)?;
-    format_result(call, source, &agent, &prepared, logits, actions)
+    format_result(call, &agent, &prepared, logits, actions)
 }
