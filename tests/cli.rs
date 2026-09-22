@@ -734,7 +734,7 @@ fn infer_runs_a_real_laya_checkpoint() {
     }
     let mixed = infer(mixed_questions);
 
-    assert_eq!(mixed["model"], "laya-rl-agent");
+    assert_eq!(mixed["model"], "convaiinnovations/laya");
 
     // Every reported number is rounded half-even at four decimals, so re-rounding one is the
     // identity: an unrounded float fails here.

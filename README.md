@@ -102,7 +102,7 @@ the shape of one:
 
 ```json
 {
-  "model": "laya-rl-agent",
+  "model": "convaiinnovations/laya",
   "answers": {
     "route": {
       "type": "choice",

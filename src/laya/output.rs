@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use crate::call::{Call, QuestionType};
 use crate::error::{Error, Result};
+use crate::model_source::ModelSource;
 
 use super::config::AgentConfig;
 use super::prompt::Prepared;
@@ -77,6 +78,7 @@ fn confidence(probabilities: &[f32]) -> f32 {
 /// probability is missing.
 pub(super) fn format_result(
     call: &Call,
+    source: &ModelSource,
     agent: &AgentConfig,
     prepared: &[Prepared],
     logits: Vec<Vec<f32>>,
@@ -216,7 +218,7 @@ pub(super) fn format_result(
         .map(|item| item.sequence.ids.len())
         .sum::<usize>();
     Ok(serde_json::json!({
-        "model": "laya-rl-agent", "answers": answers,
+        "model": source.repo, "answers": answers,
         "usage": { "input_tokens": input_tokens, "output_tokens": 0 }
     }))
 }
@@ -226,6 +228,7 @@ mod tests {
     use super::*;
     use crate::call::Call;
     use crate::laya::prompt::{Prepared, Responses, Sequence};
+    use crate::model_source::LAYA;
 
     /// The per-Question-Type fallback temperatures a Checkpoint agent carries in
     /// `rl_agent_config.json`, chosen distinct so a test tells them apart.
@@ -316,6 +319,7 @@ mod tests {
         ];
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[]),
             &prepared,
             vec![vec![0.0, 0.0], vec![0.0, 0.0]],
@@ -325,7 +329,7 @@ mod tests {
         assert_eq!(
             result,
             serde_json::json!({
-                "model": "laya-rl-agent", "answers": {
+                "model": "convaiinnovations/laya", "answers": {
                     "choice": {"type": "choice", "choice": "no", "probabilities": {"no": 0.5, "yes": 0.5}, "confidence": 0.0, "action": {"act_probability": 0.25}},
                     "noul": {"type": "noul", "noul": 0.5, "confidence": 0.5, "action": {"act_probability": 0.25}}
                 }, "usage": {"input_tokens": 6, "output_tokens": 0}
@@ -353,6 +357,7 @@ mod tests {
         ] {
             let result = format_result(
                 &call,
+                &LAYA,
                 &agent(&[]),
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![logits],
@@ -381,6 +386,7 @@ mod tests {
         let judge = |agent: &AgentConfig| {
             format_result(
                 &call,
+                &LAYA,
                 agent,
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![vec![0.0, -2.0]],
@@ -427,6 +433,7 @@ mod tests {
         ];
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[("score:3-5", 0.25), ("score:6-10", 2.0), ("score:11+", 4.0)]),
             &prepared,
             vec![leading(5), leading(6), leading(10), leading(11)],
@@ -448,6 +455,7 @@ mod tests {
         let call = Call::from_bytes(br#"{"state":"x","questions":{"urgency":{"type":"score","instructions":"How urgent?","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[]),
             &[prepared(
                 QuestionType::Score,
@@ -463,7 +471,7 @@ mod tests {
         assert_eq!(
             result,
             serde_json::json!({
-                "model": "laya-rl-agent", "answers": {
+                "model": "convaiinnovations/laya", "answers": {
                     "urgency": {
                         "type": "score",
                         "score": 1.5,
@@ -502,6 +510,7 @@ mod tests {
         ];
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[("score:2", 2.0), ("choice:2", 0.5), ("score:3-5", 0.25)]),
             &prepared,
             vec![
@@ -537,6 +546,7 @@ mod tests {
         let call = Call::from_bytes(br#"{"state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[("score:2", 0.000_1)]),
             &[prepared(QuestionType::Score, &["low", "high"], 3)],
             vec![vec![0.000_5, 0.0]],
@@ -563,6 +573,7 @@ mod tests {
         ];
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[("score:11+", 1.0)]),
             &[prepared(QuestionType::Score, &names, 3)],
             vec![logits],
@@ -582,6 +593,7 @@ mod tests {
         let call = Call::from_bytes(br#"{"state":"x","questions":{"q":{"type":"choice","instructions":"x","criteria":["a","b","c"]}}}"#).unwrap();
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[]),
             &[prepared(QuestionType::Choice, &["a", "b", "c"], 3)],
             vec![vec![0.0; 3]],
@@ -609,6 +621,7 @@ mod tests {
             "churn_risk":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let result = format_result(
             &call,
+            &LAYA,
             &agent(&[]),
             &[
                 prepared(QuestionType::Choice, &["billing", "shipping", "account"], 4),
