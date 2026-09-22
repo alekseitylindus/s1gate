@@ -129,8 +129,21 @@ strings, objects, or arrays. The numbers below only show the shape of one respon
 }
 ```
 
-To use Jev, set `model` to `jev-latest` and provide `TYPESAFE_API_KEY`. That choice sends the call's
-State and Questions to `TypeSafe`. Laya uses its stored Checkpoint and makes no network request.
+To use Jev, set `model` to `jev-latest` and provide a TypeSafe API key through configuration or
+`TYPESAFE_API_KEY`. That choice sends the call's State and Questions to `TypeSafe`. Laya uses its
+stored Checkpoint and makes no network request.
+
+You can store the key in `$XDG_CONFIG_HOME/s1gate/config.toml`, or in `~/.config/s1gate/config.toml`
+when `XDG_CONFIG_HOME` is unset or empty:
+
+```toml
+[typesafe]
+api_key = "your-api-key"
+```
+
+Restrict this file to your user, for example with `chmod 600 ~/.config/s1gate/config.toml`. A set
+`TYPESAFE_API_KEY` takes precedence for that process. An empty environment value is an error and
+does not fall back to the file.
 
 A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
 as JSON. `choice` Criteria is an object whose values are strings, objects, arrays, or `null`.

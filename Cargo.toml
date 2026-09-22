@@ -21,6 +21,7 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 tokenizers = "0.23.2"
+toml = "=1.1.6"
 
 [dev-dependencies]
 parking_lot = "0.12.5"
