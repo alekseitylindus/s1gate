@@ -21,7 +21,7 @@ use crate::store::Store;
 use config::{read_agent_config, read_encoder_config, validate_config};
 use output::format_result;
 use prompt::{prepare, special_tokens};
-use runtime::{forward, load_weights};
+use runtime::{Forward, forward, load_weights};
 
 #[derive(Debug)]
 pub(super) struct SpecialTokens {
@@ -33,6 +33,12 @@ pub(super) struct SpecialTokens {
 }
 
 /// Run one validated System One Call against a local Checkpoint.
+///
+/// # Errors
+///
+/// Fails when the Model Source is not curated, when Checkpoint verification or hashing fails, when
+/// the Checkpoint configuration is missing or invalid, when the tokenizer cannot be loaded, when
+/// the prompt does not fit the token budget, or when native inference fails.
 pub fn run(store: &Store, source: &ModelSource, call: &Call) -> Result<Value> {
     let directory = store.checkpoint_dir(source.repo)?;
     checkpoint::verify(store, source)?;
@@ -48,6 +54,6 @@ pub fn run(store: &Store, source: &ModelSource, call: &Call) -> Result<Value> {
     let special = special_tokens(&directory, &tokenizer)?;
     let prepared = prepare(call, &tokenizer, &special, &agent)?;
     let weights = load_weights(&directory.join("model.safetensors"))?;
-    let (logits, actions) = forward(&encoder, &agent, &weights, &prepared, &special)?;
-    format_result(call, &agent, prepared, logits, actions)
+    let Forward { logits, actions } = forward(&encoder, &agent, &weights, &prepared, &special)?;
+    format_result(call, &agent, &prepared, logits, actions)
 }

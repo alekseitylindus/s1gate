@@ -10,10 +10,10 @@ use support::fixture;
 use support::{TempDir, git_blob_sha1, sha256, tree};
 
 use s1gate::Error;
+use s1gate::checkpoint;
 use s1gate::model_source::{self, ModelSource};
 use s1gate::provenance::{Algorithm, Provenance, PublishedChecksum};
 use s1gate::store::Store;
-use s1gate::checkpoint;
 
 /// The curated Model Source the fixture Checkpoint came from.
 fn source() -> &'static ModelSource {
@@ -177,7 +177,12 @@ fn verification_reports_a_published_checksum_that_disagrees() {
     let root = TempDir::new("verify-published-sha256");
     fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
-        provenance.files[0].published = Some(PublishedChecksum {
+        let record = provenance
+            .files
+            .iter_mut()
+            .find(|record| record.path == "model.safetensors")
+            .expect("the record");
+        record.published = Some(PublishedChecksum {
             algorithm: Algorithm::Sha256,
             checksum: "0".repeat(64),
         });
@@ -199,14 +204,19 @@ fn verification_reports_a_published_blob_id_that_disagrees() {
     let root = TempDir::new("verify-published-blob");
     fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
-        provenance.files[1].published = Some(PublishedChecksum {
+        let record = provenance
+            .files
+            .iter_mut()
+            .find(|record| record.path == "rl_agent_config.json")
+            .expect("the record");
+        record.published = Some(PublishedChecksum {
             algorithm: Algorithm::GitBlobSha1,
             checksum: "0".repeat(40),
         });
     });
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the published blob id fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source())
+        .expect_err("the published blob id fails");
 
     assert!(matches!(error, Error::ChecksumMismatch { .. }));
     assert!(
@@ -225,8 +235,8 @@ fn verification_rejects_a_parameter_the_manifest_does_not_ask_for() {
     );
     fixture::write(root.path(), header);
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the extra parameter fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source())
+        .expect_err("the extra parameter fails");
 
     assert!(matches!(error, Error::UnexpectedParameter { .. }));
     assert!(error.to_string().contains("`unexpected.weight`"), "{error}");
@@ -296,11 +306,11 @@ fn verification_rejects_a_malformed_safetensors_header() {
     fs::write(&path, &bytes).expect("corrupt the header");
     record_file(root.path(), "model.safetensors", &bytes);
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the malformed header fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source())
+        .expect_err("the malformed header fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
-    assert!(error.to_string().contains("header"), "{error}");
+    assert!(error.to_string().contains("header is not JSON"), "{error}");
 }
 
 #[test]
@@ -328,11 +338,23 @@ fn verification_rejects_a_record_with_duplicate_files() {
     let root = TempDir::new("verify-duplicate-records");
     fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
-        let path = provenance.files[0].path.clone();
-        provenance.files[1].path = path;
+        let path = provenance
+            .files
+            .iter()
+            .find(|record| record.path == "model.safetensors")
+            .expect("the record")
+            .path
+            .clone();
+        let record = provenance
+            .files
+            .iter_mut()
+            .find(|record| record.path == "rl_agent_config.json")
+            .expect("the record");
+        record.path = path;
     });
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the duplicate fails");
+    let error =
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the duplicate fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -346,10 +368,16 @@ fn verification_rejects_a_record_missing_an_allowlisted_file() {
     let root = TempDir::new("verify-foreign-record");
     fixture::write(root.path(), fixture::header());
     rewrite_provenance(root.path(), |provenance| {
-        provenance.files[0].path = "README.md".to_string();
+        let record = provenance
+            .files
+            .iter_mut()
+            .find(|record| record.path == "model.safetensors")
+            .expect("the record");
+        record.path = "README.md".to_string();
     });
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the record fails");
+    let error =
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the record fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -385,8 +413,8 @@ fn verification_rejects_a_record_that_cannot_be_read() {
     let directory = fixture::write(root.path(), fixture::header());
     fs::write(directory.join("provenance.json"), b"{\"source\":").expect("truncate the record");
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the truncated record fails");
+    let error = checkpoint::verify(&Store::at(root.path()), source())
+        .expect_err("the truncated record fails");
 
     assert!(matches!(error, Error::Json { .. }));
     assert!(error.to_string().contains("provenance.json"), "{error}");
@@ -396,7 +424,8 @@ fn verification_rejects_a_record_that_cannot_be_read() {
 fn verification_reports_a_checkpoint_the_store_does_not_hold() {
     let root = TempDir::new("verify-absent");
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("nothing is stored");
+    let error =
+        checkpoint::verify(&Store::at(root.path()), source()).expect_err("nothing is stored");
 
     assert!(matches!(error, Error::MissingCheckpoint { .. }));
 }

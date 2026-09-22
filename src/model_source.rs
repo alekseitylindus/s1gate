@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 
 /// An upstream repository that publishes Checkpoints s1gate can execute.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSource {
     /// `<owner>/<name>` on the Model Source's host: the name the operator pulls by, and the name
     /// the Checkpoint is stored under (ADR-0011).
@@ -29,11 +29,15 @@ pub const LAYA: ModelSource = ModelSource {
 pub const SOURCES: &[ModelSource] = &[LAYA];
 
 /// The supported Model Source repositories, in curation order.
-pub fn supported() -> impl Iterator<Item = &'static str> {
+pub(crate) fn supported() -> impl Iterator<Item = &'static str> {
     SOURCES.iter().map(|source| source.repo)
 }
 
 /// The curated Model Source for `repo`, or the error naming the supported ones.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedSource`], exit code 2, when `repo` is not one of the curated repositories.
 pub fn lookup(repo: &str) -> Result<&'static ModelSource> {
     SOURCES
         .iter()

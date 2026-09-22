@@ -4,7 +4,7 @@
 //! first response is where the Model Source states the commit it served and the checksum it
 //! publishes for the file.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::io::Read;
 use std::time::Duration;
 
@@ -53,12 +53,12 @@ impl Read for RemoteFile {
 
 impl Hub {
     /// The Hub the curated Model Sources live on.
-    pub fn public() -> Hub {
-        Hub::at(PUBLIC_HUB)
+    pub fn public() -> Self {
+        Self::at(PUBLIC_HUB)
     }
 
     /// A Hub at `base`, which is how tests point Pull at a local Model Source.
-    pub fn at(base: impl Into<String>) -> Hub {
+    pub fn at(base: impl Into<String>) -> Self {
         let base = base.into();
         let base = base.trim_end_matches('/').to_string();
         let config = Agent::config_builder()
@@ -69,17 +69,20 @@ impl Hub {
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .build();
-        Hub {
+        Self {
             base,
             agent: config.new_agent(),
         }
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
-    }
-
     /// The commit `revision` names; `None` asks for the default branch.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RevisionNotFound`] when the Model Source has no such revision, and
+    /// [`Error::UnresolvedRevision`] when it answers without naming a commit.
+    /// [`Error::Status`] and [`Error::Transport`] when the request does not complete, and
+    /// [`Error::Json`] when the answer is not a model.
     pub fn resolve(&self, repo: &str, revision: Option<&str>) -> Result<String> {
         let url = match revision {
             Some(revision) => format!(
@@ -124,8 +127,18 @@ impl Hub {
     }
 
     /// Open `path` of `commit` for streaming.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Status`] and [`Error::Transport`] when the Model Source cannot serve the request,
+    /// [`Error::UnexpectedCommit`] when the first response says the file comes from another commit,
+    /// and [`Error::MissingFile`] when the Model Source does not publish `path`.
     pub fn open(&self, repo: &str, commit: &str, path: &str) -> Result<RemoteFile> {
-        let mut url = format!("{}/{repo}/resolve/{commit}/{path}", self.base);
+        let mut url = format!(
+            "{}/{repo}/resolve/{}/{path}",
+            self.base,
+            encode_segment(commit)
+        );
         let mut published = None;
         let mut announced_size = None;
         for hop in 0..=MAX_REDIRECTS {
@@ -140,7 +153,7 @@ impl Hub {
                 // The first response is where the Model Source states the commit it served and the
                 // checksum it publishes, whether it serves the file itself or redirects to a
                 // presigned URL.
-                if let Some(served) = header(&response, "x-repo-commit")
+                if let Some(served) = header(&response, "x-repo-commit", &url, status)?
                     && served != commit
                 {
                     return Err(Error::UnexpectedCommit {
@@ -149,18 +162,25 @@ impl Hub {
                         served: served.to_string(),
                     });
                 }
-                published = header(&response, "x-linked-etag")
+                published = header(&response, "x-linked-etag", &url, status)?
                     .as_deref()
                     .and_then(published_checksum);
-                announced_size =
-                    header(&response, "x-linked-size").and_then(|size| size.parse().ok());
+                announced_size = match header(&response, "x-linked-size", &url, status)? {
+                    None => None,
+                    Some(size) => Some(size.parse().map_err(|_| Error::Status {
+                        url: url.clone(),
+                        status,
+                        note: "the announced file size is not a number",
+                    })?),
+                };
             }
             if status / 100 == 3 {
-                let location = header(&response, "location").ok_or_else(|| Error::Status {
-                    url: url.clone(),
-                    status,
-                    note: "the redirect names no location",
-                })?;
+                let location =
+                    header(&response, "location", &url, status)?.ok_or_else(|| Error::Status {
+                        url: url.clone(),
+                        status,
+                        note: "the redirect names no location",
+                    })?;
                 url = join(&self.base, &location);
                 continue;
             }
@@ -194,25 +214,76 @@ struct ResolvedModel {
 }
 
 /// The Model Source's published checksum for a file, as carried in `x-linked-etag`: LFS files are
-/// published as a sha256, git-tracked files as a git blob object id.
+/// published as a sha256, git-tracked files as a git blob object id. `None` when the etag is not a
+/// digest of either kind, which is how the Model Source states that it publishes none.
 fn published_checksum(etag: &str) -> Option<PublishedChecksum> {
-    let etag = etag.trim();
-    let etag = etag.strip_prefix("W/").unwrap_or(etag);
-    let etag = etag.trim_matches('"');
-    let algorithm = match etag.len() {
-        64 if etag.bytes().all(|byte| byte.is_ascii_hexdigit()) => Algorithm::Sha256,
-        40 if etag.bytes().all(|byte| byte.is_ascii_hexdigit()) => Algorithm::GitBlobSha1,
-        _ => return None,
-    };
-    Some(PublishedChecksum {
-        algorithm,
-        checksum: etag.to_ascii_lowercase(),
-    })
+    PublishedChecksum::try_from(etag).ok()
 }
 
-fn header(response: &ureq::http::Response<ureq::Body>, name: &str) -> Option<String> {
-    let value = response.headers().get(name)?.to_str().ok()?;
-    Some(value.to_string())
+/// Why an `x-linked-etag` is not a checksum s1gate can recompute, and so is not a checksum Pull
+/// checks the streamed bytes against. Any other etag is; a Model Source that publishes nothing for
+/// a file simply sends no `x-linked-etag`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusableEtag {
+    /// The tag is neither 64 nor 40 hexadecimal digits, so it is neither a sha256 nor a git blob
+    /// object id.
+    NotADigest,
+}
+
+impl fmt::Display for UnusableEtag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let note = match self {
+            Self::NotADigest => "the etag is neither 64 nor 40 hexadecimal digits",
+        };
+        f.write_str(note)
+    }
+}
+
+impl std::error::Error for UnusableEtag {}
+
+impl TryFrom<&str> for PublishedChecksum {
+    type Error = UnusableEtag;
+
+    fn try_from(etag: &str) -> Result<Self, Self::Error> {
+        let etag = etag.trim();
+        let etag = etag.strip_prefix("W/").unwrap_or(etag);
+        let etag = etag.trim_matches('"');
+        if !etag.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(UnusableEtag::NotADigest);
+        }
+        let algorithm = match etag.len() {
+            64 => Algorithm::Sha256,
+            40 => Algorithm::GitBlobSha1,
+            _ => return Err(UnusableEtag::NotADigest),
+        };
+        Ok(Self {
+            algorithm,
+            checksum: etag.to_ascii_lowercase(),
+        })
+    }
+}
+
+/// The value of the response header `name`: `Ok(None)` when the response carries no such header.
+///
+/// # Errors
+///
+/// [`Error::Status`] when the header is there but its bytes are not text, which is otherwise
+/// indistinguishable from the header being absent.
+fn header(
+    response: &ureq::http::Response<ureq::Body>,
+    name: &str,
+    url: &str,
+    status: u16,
+) -> Result<Option<String>> {
+    let Some(value) = response.headers().get(name) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| Error::Status {
+        url: url.to_string(),
+        status,
+        note: "a response header is not text",
+    })?;
+    Ok(Some(value.to_string()))
 }
 
 fn status_error(url: &str, status: u16) -> Error {
@@ -241,7 +312,15 @@ fn join(base: &str, location: &str) -> String {
     if location.starts_with("http://") || location.starts_with("https://") {
         return location.to_string();
     }
-    let origin: String = base.split('/').take(3).collect::<Vec<_>>().join("/");
+    // The origin is the first three `/`-separated pieces of `base`, which spell `<scheme>`, the
+    // empty piece between the two slashes and `<authority>`; a base naming no path still has them.
+    let mut pieces = base.splitn(4, '/');
+    let origin = match (pieces.next(), pieces.next(), pieces.next()) {
+        (Some(scheme), Some(separator), Some(authority)) => {
+            format!("{scheme}/{separator}/{authority}")
+        }
+        _ => base.to_string(),
+    };
     if location.starts_with('/') {
         format!("{origin}{location}")
     } else {
@@ -255,7 +334,7 @@ fn encode_segment(segment: &str) -> String {
     for byte in segment.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
+                encoded.push(char::from(byte));
             }
             _ => {
                 let _ = write!(encoded, "%{byte:02X}");

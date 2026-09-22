@@ -1,5 +1,7 @@
 //! The Provenance record: the facts that identify a pulled Checkpoint and verify every stored file.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 /// The digest a Model Source publishes for a file. It says which hash the recorded value is, so a
@@ -16,7 +18,9 @@ pub enum Algorithm {
 /// The checksum a Model Source publishes for one file, as it publishes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishedChecksum {
+    /// The hash the checksum is, which says how a reader recomputes it from the stored bytes.
     pub algorithm: Algorithm,
+    /// The checksum itself, as that hash's hexadecimal text.
     pub checksum: String,
 }
 
@@ -25,6 +29,7 @@ pub struct PublishedChecksum {
 pub struct FileRecord {
     /// Path relative to the Checkpoint directory, as the Model Source publishes it.
     pub path: String,
+    /// The size in bytes of the stored file.
     pub size: u64,
     /// The sha256 of the stored bytes, computed while Pull streamed them.
     pub sha256: String,
@@ -41,6 +46,7 @@ pub struct Provenance {
     pub requested_revision: Option<String>,
     /// The commit the files were pulled from.
     pub resolved_revision: String,
+    /// One record per allowlisted Checkpoint file, as Pull stored them.
     pub files: Vec<FileRecord>,
 }
 
@@ -49,17 +55,37 @@ impl Provenance {
     /// Checkpoint: Pull writes it only after every file is stored.
     pub const FILE_NAME: &'static str = "provenance.json";
 
+    /// The record of `path`, or `None` when the record holds no file by that name.
     pub fn file(&self, path: &str) -> Option<&FileRecord> {
         self.files.iter().find(|file| file.path == path)
     }
 
+    /// This record as the JSON text `provenance.json` holds.
+    ///
+    /// # Panics
+    ///
+    /// If the record could not be serialized, which its plain fields do not allow.
     pub fn to_json(&self) -> String {
         let mut json = serde_json::to_string_pretty(self).expect("Provenance serializes");
         json.push('\n');
         json
     }
 
-    pub fn from_json(json: &str) -> serde_json::Result<Provenance> {
+    /// Read a Provenance record from `json`.
+    ///
+    /// # Errors
+    ///
+    /// The `serde_json` error for text that is not a Provenance record: not JSON at all, or a
+    /// field that is missing or is not of its type.
+    pub fn from_json(json: &str) -> serde_json::Result<Self> {
+        json.parse()
+    }
+}
+
+impl FromStr for Provenance {
+    type Err = serde_json::Error;
+
+    fn from_str(json: &str) -> Result<Self, Self::Err> {
         serde_json::from_str(json)
     }
 }

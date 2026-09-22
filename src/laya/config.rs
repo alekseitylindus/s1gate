@@ -5,10 +5,12 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+// Both allow-lists are kept in sorted order: `parse_config` binary-searches them.
 const ENCODER_KEYS: &[&str] = &[
     "architectures",
     "attention_bias",
@@ -150,10 +152,12 @@ pub(super) fn validate_config(encoder: &EncoderConfig, agent: &AgentConfig) -> R
     if encoder.vocab_size == 0
         || encoder.hidden_size == 0
         || encoder.intermediate_size == 0
-        || encoder.intermediate_size % 2 != 0
+        || !encoder.intermediate_size.is_multiple_of(2)
         || encoder.num_attention_heads == 0
-        || encoder.hidden_size % encoder.num_attention_heads != 0
-        || encoder.hidden_size % 64 != 0
+        || !encoder
+            .hidden_size
+            .is_multiple_of(encoder.num_attention_heads)
+        || !encoder.hidden_size.is_multiple_of(64)
         || encoder.num_hidden_layers == 0
         || encoder.local_attention == 0
         || encoder.max_position_embeddings == 0
@@ -183,7 +187,7 @@ pub(super) fn validate_config(encoder: &EncoderConfig, agent: &AgentConfig) -> R
         });
     }
     // Rotary embeddings rotate the two halves of a head against each other.
-    if (encoder.hidden_size / encoder.num_attention_heads) % 2 != 0 {
+    if !(encoder.hidden_size / encoder.num_attention_heads).is_multiple_of(2) {
         return Err(Error::Inference {
             message: "attention head width must be even for rotary embeddings".to_string(),
         });
@@ -199,23 +203,22 @@ pub(super) fn validate_config(encoder: &EncoderConfig, agent: &AgentConfig) -> R
     Ok(())
 }
 
-fn read_config<T: for<'de> Deserialize<'de>>(path: &Path, allowed: &[&str]) -> Result<T> {
+fn read_config<T: DeserializeOwned>(path: &Path, allowed: &[&str]) -> Result<T> {
     let bytes = fs::read(path).map_err(|error| Error::io("read", path, error))?;
     parse_config(path, &bytes, allowed)
 }
 
-fn parse_config<T: for<'de> Deserialize<'de>>(
-    path: &Path,
-    bytes: &[u8],
-    allowed: &[&str],
-) -> Result<T> {
+fn parse_config<T: DeserializeOwned>(path: &Path, bytes: &[u8], allowed: &[&str]) -> Result<T> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| Error::json(path.display().to_string(), error))?;
     let object = value.as_object().ok_or_else(|| Error::InvalidCheckpoint {
         path: path.to_path_buf(),
         message: "configuration is not an object".to_string(),
     })?;
-    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+    if let Some(key) = object
+        .keys()
+        .find(|key| allowed.binary_search(&key.as_str()).is_err())
+    {
         return Err(Error::InvalidCheckpoint {
             path: path.to_path_buf(),
             message: format!("configuration has unknown field `{key}`"),

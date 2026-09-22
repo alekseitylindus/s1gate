@@ -229,17 +229,20 @@ fn an_interrupted_pull_leaves_a_partial_file_the_next_pull_streams_again() {
     let hub = Hub::at(source.base_url());
     let checkpoint = root.path().join(LAYA);
 
-    pull::pull(&store, &hub, &request()).expect_err("a truncated Pull fails");
+    let error = pull::pull(&store, &hub, &request()).expect_err("a truncated Pull fails");
+    // The body is shorter than the announced `content-length`, so the read of the stream fails
+    // (src/pull/mod.rs: `remote.read(..)` maps to `Error::io("read", &partial, ..)`).
+    assert!(
+        matches!(error, s1gate::Error::Io { op: "read", .. }),
+        "{error}"
+    );
 
     assert!(
         checkpoint.join("model.safetensors.part").exists(),
         "the interrupted Pull is left as a partial file"
     );
     assert!(!checkpoint.join("model.safetensors").exists());
-    assert_eq!(
-        store.provenance(LAYA).expect("the store is readable"),
-        None
-    );
+    assert_eq!(store.provenance(LAYA).expect("the store is readable"), None);
 
     let attempts = source.file_requests().len();
     source.publish(FIRST, published(FIRST));
@@ -308,8 +311,7 @@ fn pull_rejects_a_file_whose_bytes_do_not_match_the_published_checksum() {
             &"1".repeat(40),
         ),
     );
-    let error =
-        pull::pull(&store, &hub, &request()).expect_err("a corrupt config file fails");
+    let error = pull::pull(&store, &hub, &request()).expect_err("a corrupt config file fails");
     assert!(matches!(error, s1gate::Error::ChecksumMismatch { .. }));
     assert!(
         error
@@ -525,7 +527,8 @@ fn corrupting(files: Vec<ServedFile>, path: &str, etag: &str) -> Vec<ServedFile>
 }
 
 fn stored(root: &TempDir, path: &str) -> Vec<u8> {
-    std::fs::read(root.path().join(LAYA).join(path)).unwrap_or_else(|_| panic!("{path} is stored"))
+    std::fs::read(root.path().join(LAYA).join(path))
+        .unwrap_or_else(|error| panic!("{path} is stored: {error}"))
 }
 
 fn request() -> PullRequest {

@@ -10,15 +10,23 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 
 /// One System One Call: evidence plus the Questions to judge against it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
+    /// The evidence every Question of the call is judged against.
     pub state: Value,
+    /// The Questions to judge, each under its caller-chosen id.
     pub questions: Questions,
 }
 
 impl Call {
     /// Parse and validate exactly one System One Call from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// The input is not UTF-8, is not exactly one JSON System One Call, carries trailing input,
+    /// holds no Questions, names a Question with an unusable or repeated id, or defines Criteria of
+    /// the wrong shape, with fewer than two names, or with repeated names.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let json = std::str::from_utf8(bytes)
             .map_err(|error| Error::invalid_call(format!("the input is not UTF-8: {error}")))?;
@@ -51,14 +59,16 @@ impl Call {
 }
 
 /// Caller-chosen Question ids in their input order.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Questions(Vec<(String, Question)>);
 
 impl Questions {
+    /// Whether the call holds no Question.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// The Questions in input order, each with its caller-chosen id.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Question)> {
         self.0.iter().map(|(id, question)| (id.as_str(), question))
     }
@@ -82,10 +92,9 @@ impl<'de> Deserialize<'de> for Questions {
             where
                 A: MapAccess<'de>,
             {
-                let mut ids = BTreeSet::new();
                 let mut questions = Vec::new();
                 while let Some(id) = map.next_key::<String>()? {
-                    if !ids.insert(id.clone()) {
+                    if questions.iter().any(|(existing, _)| existing == &id) {
                         return Err(de::Error::custom(format!(
                             "duplicate Question id {}",
                             Name(&id)
@@ -102,12 +111,15 @@ impl<'de> Deserialize<'de> for Questions {
 }
 
 /// One Question and its answer-space definition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Question {
+    /// The kind of Answer this Question expects.
     #[serde(rename = "type")]
     pub kind: QuestionType,
+    /// What the Question asks, rendered into its prompt.
     pub instructions: String,
+    /// The answer space the Question defines; a `noul` Question may leave it out.
     pub criteria: Option<Criteria>,
 }
 
@@ -161,20 +173,23 @@ impl Question {
 }
 
 /// The only Question Types supported by the first Backend.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuestionType {
+    /// One of the Question's labelled Options is chosen.
     Choice,
+    /// One of the Question's ordered Levels is reported.
     Score,
+    /// The probability of the true side is reported.
     Noul,
 }
 
 impl fmt::Display for QuestionType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            QuestionType::Choice => "choice",
-            QuestionType::Score => "score",
-            QuestionType::Noul => "noul",
+            Self::Choice => "choice",
+            Self::Score => "score",
+            Self::Noul => "noul",
         })
     }
 }
@@ -182,17 +197,19 @@ impl fmt::Display for QuestionType {
 impl QuestionType {
     pub(crate) fn index(self) -> usize {
         match self {
-            QuestionType::Choice => 0,
-            QuestionType::Score => 1,
-            QuestionType::Noul => 2,
+            Self::Choice => 0,
+            Self::Score => 1,
+            Self::Noul => 2,
         }
     }
 }
 
 /// Criteria are either named Options or ordered Levels.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Criteria {
+    /// Named Options, in the order the caller wrote them.
     Object(Vec<(String, Value)>),
+    /// Ordered Levels, in the order the caller wrote them.
     List(Vec<Value>),
 }
 
@@ -246,10 +263,9 @@ fn name_is_usable(name: &str) -> bool {
 /// The Options or Levels a Question's Criteria defines, named `noun` in diagnostics: at least two,
 /// each a usable name, and none repeated.
 fn validate_names(id: &str, kind: QuestionType, noun: &str, names: &[&str]) -> Result<()> {
-    let plural = format!("{noun}s");
     if names.len() < 2 {
         return Err(Error::invalid_call(format!(
-            "Question `{id}` {kind} Criteria must contain at least two {plural}"
+            "Question `{id}` {kind} Criteria must contain at least two {noun}s"
         )));
     }
     let mut seen = BTreeSet::new();
@@ -262,7 +278,7 @@ fn validate_names(id: &str, kind: QuestionType, noun: &str, names: &[&str]) -> R
         }
         if !seen.insert(*name) {
             return Err(Error::invalid_call(format!(
-                "Question `{id}` {kind} Criteria must contain distinct {plural}"
+                "Question `{id}` {kind} Criteria must contain distinct {noun}s"
             )));
         }
     }

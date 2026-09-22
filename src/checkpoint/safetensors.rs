@@ -12,12 +12,21 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 
 use super::invalid;
-use super::manifest::Manifest;
+use super::manifest::{Dtype, Manifest};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HeaderEntry {
+    /// The dtype as the header spells it; parsed into a [`Dtype`] before the entry is used.
     dtype: String,
+    shape: Vec<u64>,
+    data_offsets: [u64; 2],
+}
+
+/// A header entry once its dtype is parsed: what the weights file states a parameter is.
+#[derive(Debug)]
+struct ParsedEntry {
+    dtype: Dtype,
     shape: Vec<u64>,
     data_offsets: [u64; 2],
 }
@@ -53,7 +62,6 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
         .as_object()
         .ok_or_else(|| invalid(path, "header is not an object"))?;
     let mut entries = BTreeMap::new();
-    let mut ranges = Vec::new();
     for (name, value) in object {
         if name == "__metadata__" {
             if !value.is_object() {
@@ -61,16 +69,15 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
             }
             continue;
         }
-        let entry: HeaderEntry = HeaderEntry::deserialize(value).map_err(|error| {
-            invalid(path, format!("parameter `{name}` is invalid: {error}"))
-        })?;
+        let entry: HeaderEntry = HeaderEntry::deserialize(value)
+            .map_err(|error| invalid(path, format!("parameter `{name}` is invalid: {error}")))?;
         if entry.data_offsets[0] > entry.data_offsets[1] || entry.data_offsets[1] > data_len {
             return Err(invalid(
                 path,
                 format!("parameter `{name}` has invalid data offsets"),
             ));
         }
-        let element_bytes = element_bytes(&entry.dtype).ok_or_else(|| {
+        let dtype = entry.dtype.parse::<Dtype>().map_err(|_| {
             invalid(
                 path,
                 format!(
@@ -83,7 +90,7 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
             .shape
             .iter()
             .try_fold(1u64, |elements, size| elements.checked_mul(*size))
-            .and_then(|elements| elements.checked_mul(element_bytes))
+            .and_then(|elements| elements.checked_mul(dtype.bytes()))
             .ok_or_else(|| invalid(path, format!("parameter `{name}` shape is too large")))?;
         if entry.data_offsets[1] - entry.data_offsets[0] != expected_bytes {
             return Err(invalid(
@@ -91,9 +98,20 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
                 format!("parameter `{name}` data length does not match its dtype and shape"),
             ));
         }
-        ranges.push((entry.data_offsets[0], entry.data_offsets[1], name.clone()));
-        entries.insert(name.clone(), entry);
+        // The name is stored once; the data ranges borrow it back out of the map to be sorted.
+        entries.insert(
+            name.clone(),
+            ParsedEntry {
+                dtype,
+                shape: entry.shape,
+                data_offsets: entry.data_offsets,
+            },
+        );
     }
+    let mut ranges: Vec<(u64, u64, &str)> = entries
+        .iter()
+        .map(|(name, entry)| (entry.data_offsets[0], entry.data_offsets[1], name.as_str()))
+        .collect();
     ranges.sort_by_key(|range| range.0);
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 {
@@ -112,7 +130,7 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
             return Err(Error::ParameterMismatch {
                 name: name.clone(),
                 expected_dtype: expected.dtype.to_string(),
-                actual_dtype: actual.dtype.clone(),
+                actual_dtype: actual.dtype.to_string(),
                 expected_shape: expected.shape.clone(),
                 actual_shape: actual.shape.clone(),
             });
@@ -125,15 +143,4 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
         return Err(Error::UnexpectedParameter { name: name.clone() });
     }
     Ok(())
-}
-
-/// The bytes one element of `dtype` occupies, or `None` when safetensors does not define `dtype`.
-fn element_bytes(dtype: &str) -> Option<u64> {
-    match dtype {
-        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" => Some(1),
-        "U16" | "I16" | "F16" | "BF16" => Some(2),
-        "U32" | "I32" | "F32" => Some(4),
-        "U64" | "I64" | "F64" => Some(8),
-        _ => None,
-    }
 }

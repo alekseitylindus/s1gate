@@ -41,6 +41,7 @@ pub struct PullRequest {
 pub struct Outcome {
     /// The Checkpoint directory.
     pub directory: PathBuf,
+    /// The Provenance record this Pull stored, whether or not it streamed a file.
     pub provenance: Provenance,
     /// The files this Pull streamed; empty when the Checkpoint already held the resolved revision.
     pub pulled: Vec<String>,
@@ -54,6 +55,17 @@ impl Outcome {
 }
 
 /// Pull `request` from `hub` into `store`.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedSource`] when `request.source` is not curated, and [`Error::InvalidName`]
+/// when its name cannot be a Checkpoint directory. [`Error::RevisionHeld`] when the name already
+/// holds another revision and `force` is not set. [`Error::RevisionNotFound`],
+/// [`Error::UnresolvedRevision`], [`Error::Status`] and [`Error::Transport`] when the revision
+/// cannot be resolved. [`Error::MissingFile`] and [`Error::UnexpectedCommit`] when a file is not
+/// the one the resolved revision publishes, and [`Error::SizeMismatch`] or
+/// [`Error::ChecksumMismatch`] when its bytes are not. [`Error::Io`] and [`Error::Json`] when the
+/// Model Store cannot be read, written or renamed into place.
 pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> {
     let source = model_source::lookup(&request.source)?;
     let directory = store.checkpoint_dir(source.repo)?;
@@ -82,7 +94,7 @@ pub fn pull(store: &Store, hub: &Hub, request: &PullRequest) -> Result<Outcome> 
     let mut files = Vec::with_capacity(source.files.len());
     let mut pulled = Vec::new();
     for path in source.files {
-        match stored(&directory, path, held.as_ref(), reusing) {
+        match stored(&directory, path, held.as_ref(), reusing)? {
             Some(record) => files.push(record),
             None => {
                 eprintln!("s1gate: pulling {path}");
@@ -115,13 +127,22 @@ fn stored(
     path: &str,
     held: Option<&Provenance>,
     reusing: bool,
-) -> Option<FileRecord> {
+) -> Result<Option<FileRecord>> {
     if !reusing {
-        return None;
+        return Ok(None);
     }
-    let record = held?.file(path)?;
-    let size = std::fs::metadata(directory.join(path)).ok()?.len();
-    (size == record.size).then(|| record.clone())
+    let Some(record) = held.and_then(|held| held.file(path)) else {
+        return Ok(None);
+    };
+    let file = directory.join(path);
+    let size = match std::fs::metadata(&file) {
+        Ok(metadata) => metadata.len(),
+        // A Checkpoint that lost a file is one Pull can repair: absent is not stored, so the file
+        // is streamed again. Any other failure is a fault, and a fault is not an answer.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::io("inspect", &file, error)),
+    };
+    Ok((size == record.size).then(|| record.clone()))
 }
 
 /// Stream one allowlisted file of a Checkpoint into its place in the Checkpoint directory.

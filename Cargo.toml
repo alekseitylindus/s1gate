@@ -2,6 +2,14 @@
 name = "s1gate"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Run local System One decision models natively"
+license = "Apache-2.0"
+repository = "https://github.com/alekseitylindus/s1gate"
+readme = "README.md"
+keywords = ["inference", "local-models", "cli"]
+categories = ["command-line-utilities", "science"]
+include = ["src/**/*", "LICENSE", "README.md"]
 
 [dependencies]
 candle-core = { version = "=0.11.0", features = ["accelerate"] }
@@ -16,3 +24,37 @@ tokenizers = "0.23.2"
 
 [dev-dependencies]
 parking_lot = "0.12.5"
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+use_self = "warn"
+doc_markdown = "warn"
+semicolon_if_nothing_returned = "warn"
+match_wildcard_for_single_variants = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+# The dependency tree carries several major versions of the same crate (base64, hashbrown,
+# getrandom), which no change to this crate can resolve.
+multiple_crate_versions = "allow"
+# Noise for a crate whose public surface is a handful of domain types and their accessors.
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Optimize dependencies in dev: the tensor kernels of candle otherwise run unoptimized in every
+# `cargo test`, which dominates the runtime of the inference tests.
+[profile.dev.package."*"]
+opt-level = 3

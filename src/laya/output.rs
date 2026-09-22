@@ -29,12 +29,15 @@ fn temperature(agent: &AgentConfig, kind: QuestionType, options: usize) -> f32 {
 
 fn stable_softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let values = logits
+    let mut values = logits
         .iter()
         .map(|value| (*value - max).exp())
         .collect::<Vec<_>>();
     let sum = values.iter().sum::<f32>();
-    values.into_iter().map(|value| value / sum).collect()
+    for value in &mut values {
+        *value /= sum;
+    }
+    values
 }
 
 fn round_even(value: f32) -> Value {
@@ -65,10 +68,17 @@ fn confidence(probabilities: &[f32]) -> f32 {
     (1.0 + entropy / (probabilities.len() as f32).ln()).clamp(0.0, 1.0)
 }
 
+/// Render the Answers for a Call from the model output over its prepared Questions.
+///
+/// # Errors
+///
+/// Fails when the output row count does not match the Question batch, when a logits or action row
+/// is missing, when a Question's Options outrun its logits, or when a choice label or `true`
+/// probability is missing.
 pub(super) fn format_result(
     call: &Call,
     agent: &AgentConfig,
-    prepared: Vec<Prepared>,
+    prepared: &[Prepared],
     logits: Vec<Vec<f32>>,
     actions: Vec<Vec<f32>>,
 ) -> Result<Value> {
@@ -133,7 +143,8 @@ pub(super) fn format_result(
                 answer.insert(
                     "choice".to_string(),
                     Value::String(
-                        item.labels
+                        item.responses
+                            .labels()
                             .get(best)
                             .ok_or_else(|| Error::Inference {
                                 message: format!("missing choice label for Question `{id}`"),
@@ -142,7 +153,8 @@ pub(super) fn format_result(
                     ),
                 );
                 let values = item
-                    .labels
+                    .responses
+                    .labels()
                     .iter()
                     .zip(&probabilities)
                     .map(|(label, probability)| (label.clone(), round_even(*probability)))
@@ -161,13 +173,15 @@ pub(super) fn format_result(
                     .sum::<f32>();
                 answer.insert("score".to_string(), round_even(score));
                 let legend = item
-                    .levels
+                    .responses
+                    .levels()
                     .iter()
                     .enumerate()
                     .map(|(index, level)| (index.to_string(), Value::String(level.clone())))
                     .collect();
                 let values = item
-                    .levels
+                    .responses
+                    .levels()
                     .iter()
                     .zip(&probabilities)
                     .enumerate()
@@ -209,7 +223,7 @@ mod tests {
 
     use super::*;
     use crate::call::Call;
-    use crate::laya::prompt::{Prepared, Sequence};
+    use crate::laya::prompt::{Prepared, Responses, Sequence};
 
     #[test]
     fn stable_softmax_handles_large_logits() {
@@ -239,16 +253,14 @@ mod tests {
             .questions
             .iter()
             .map(|(_, question)| {
-                let (options, labels, levels) = match question.kind {
+                let (options, responses) = match question.kind {
                     QuestionType::Choice => (
                         vec!["no".to_string(), "yes".to_string()],
-                        vec!["no".to_string(), "yes".to_string()],
-                        Vec::new(),
+                        Responses::Labels(vec!["no".to_string(), "yes".to_string()]),
                     ),
                     QuestionType::Noul => (
                         vec!["false".to_string(), "true".to_string()],
-                        Vec::new(),
-                        Vec::new(),
+                        Responses::Unnamed,
                     ),
                     QuestionType::Score => unreachable!(),
                 };
@@ -259,11 +271,10 @@ mod tests {
                     },
                     kind: question.kind,
                     options,
-                    labels,
-                    levels,
+                    responses,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         let agent = AgentConfig {
             max_len: 512,
             head_max_len: 192,
@@ -274,7 +285,7 @@ mod tests {
         let result = format_result(
             &call,
             &agent,
-            prepared,
+            &prepared,
             vec![vec![0.0, 0.0], vec![0.0, 0.0]],
             vec![vec![0.25], vec![0.25]],
         )

@@ -24,13 +24,39 @@ pub(super) struct Sequence {
     pub(super) markers: Vec<usize>,
 }
 
+/// The response names a Question Type reports, so an Answer can only read the
+/// names its own Question Type populates.
+#[derive(Debug)]
+pub(super) enum Responses {
+    Labels(Vec<String>),
+    Levels(Vec<String>),
+    Unnamed,
+}
+
+impl Responses {
+    /// The names a `choice` Answer reports; empty for every other Question Type.
+    pub(super) fn labels(&self) -> &[String] {
+        match self {
+            Self::Labels(labels) => labels,
+            Self::Levels(_) | Self::Unnamed => &[],
+        }
+    }
+
+    /// The names a `score` Answer reports; empty for every other Question Type.
+    pub(super) fn levels(&self) -> &[String] {
+        match self {
+            Self::Levels(levels) => levels,
+            Self::Labels(_) | Self::Unnamed => &[],
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Prepared {
     pub(super) sequence: Sequence,
     pub(super) kind: QuestionType,
     pub(super) options: Vec<String>,
-    pub(super) labels: Vec<String>,
-    pub(super) levels: Vec<String>,
+    pub(super) responses: Responses,
 }
 
 pub(super) fn special_tokens(directory: &Path, tokenizer: &Tokenizer) -> Result<SpecialTokens> {
@@ -96,22 +122,28 @@ fn python_repr(value: &Value) -> String {
         Value::Bool(false) => "False".to_string(),
         Value::Number(number) => number.to_string(),
         Value::String(text) => python_quote(text),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(python_repr)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Object(values) => format!(
-            "{{{}}}",
-            values
-                .iter()
-                .map(|(key, value)| format!("{}: {}", python_quote(key), python_repr(value)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Value::Array(values) => {
+            let mut out = String::from("[");
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "{}", python_repr(item));
+            }
+            out.push(']');
+            out
+        }
+        Value::Object(values) => {
+            let mut out = String::from("{");
+            for (index, (key, value)) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "{}: {}", python_quote(key), python_repr(value));
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -154,7 +186,13 @@ fn is_python_falsy(value: &Value) -> bool {
     }
 }
 
-fn render_options(question: &Question) -> (Vec<String>, Vec<String>, Vec<String>) {
+/// The rendered Options of a Question and the response names its Question Type reports.
+struct Rendered {
+    options: Vec<String>,
+    responses: Responses,
+}
+
+fn render_options(question: &Question) -> Rendered {
     match question.kind {
         QuestionType::Choice => match question.criteria.as_ref() {
             Some(Criteria::Object(options)) => {
@@ -168,17 +206,23 @@ fn render_options(question: &Question) -> (Vec<String>, Vec<String>, Vec<String>
                         }
                     })
                     .collect();
-                (
-                    rendered,
-                    options.iter().map(|(name, _)| name.clone()).collect(),
-                    Vec::new(),
-                )
+                let labels = options.iter().map(|(name, _)| name.clone()).collect();
+                Rendered {
+                    options: rendered,
+                    responses: Responses::Labels(labels),
+                }
             }
             Some(Criteria::List(options)) => {
                 let rendered = options.iter().map(render_value).collect::<Vec<_>>();
-                (rendered.clone(), rendered, Vec::new())
+                Rendered {
+                    options: rendered.clone(),
+                    responses: Responses::Labels(rendered),
+                }
             }
-            None => (Vec::new(), Vec::new(), Vec::new()),
+            None => Rendered {
+                options: Vec::new(),
+                responses: Responses::Labels(Vec::new()),
+            },
         },
         QuestionType::Score => match question.criteria.as_ref() {
             Some(Criteria::List(levels)) => {
@@ -188,9 +232,15 @@ fn render_options(question: &Question) -> (Vec<String>, Vec<String>, Vec<String>
                     .enumerate()
                     .map(|(index, level)| format!("level {index}: {level}"))
                     .collect();
-                (rendered, Vec::new(), levels)
+                Rendered {
+                    options: rendered,
+                    responses: Responses::Levels(levels),
+                }
             }
-            _ => (Vec::new(), Vec::new(), Vec::new()),
+            _ => Rendered {
+                options: Vec::new(),
+                responses: Responses::Levels(Vec::new()),
+            },
         },
         QuestionType::Noul => {
             let descriptions = question
@@ -212,17 +262,16 @@ fn render_options(question: &Question) -> (Vec<String>, Vec<String>, Vec<String>
                     })
                     .unwrap_or_else(|| fallback.to_string())
             };
-            (
-                vec![
+            Rendered {
+                options: vec![
                     format!(
                         "false: {}",
                         render("false", "no, the statement does not hold")
                     ),
                     format!("true: {}", render("true", "yes, the statement holds")),
                 ],
-                Vec::new(),
-                Vec::new(),
-            )
+                responses: Responses::Unnamed,
+            }
         }
     }
 }
@@ -236,7 +285,7 @@ pub(super) fn prepare(
     call.questions
         .iter()
         .map(|(_, question)| {
-            let (options, labels, levels) = render_options(question);
+            let Rendered { options, responses } = render_options(question);
             let mut head = encode(
                 tokenizer,
                 &format!(
@@ -247,7 +296,8 @@ pub(super) fn prepare(
             )?;
             let mut option_ids = Vec::with_capacity(options.len());
             for option in &options {
-                let mut ids = vec![special.mask];
+                let mut ids = Vec::with_capacity(1 + MAX_OPTION_TOKENS);
+                ids.push(special.mask);
                 let mut body = encode(
                     tokenizer,
                     &format!(" {}", option.replace(&special.mask_text, " ")),
@@ -273,7 +323,8 @@ pub(super) fn prepare(
                     .saturating_sub(option_ids.iter().map(Vec::len).sum());
             }
             head.truncate(budget.max(8));
-            let mut ids = vec![special.cls];
+            let mut ids = Vec::with_capacity(config.max_len);
+            ids.push(special.cls);
             ids.extend(head);
             ids.push(special.sep);
             let mut markers = Vec::with_capacity(option_ids.len());
@@ -298,8 +349,7 @@ pub(super) fn prepare(
                 sequence: Sequence { ids, markers },
                 kind: question.kind,
                 options,
-                labels,
-                levels,
+                responses,
             })
         })
         .collect()
@@ -349,10 +399,10 @@ fn serialize_state(state: &Value) -> Result<String> {
             PythonJsonFormatter,
         ))
         .map_err(|error| Error::Inference {
-            message: format!("serializing State: {error}"),
+            message: format!("serializing state: {error}"),
         })?;
     String::from_utf8(bytes).map_err(|error| Error::Inference {
-        message: format!("serializing State as UTF-8: {error}"),
+        message: format!("serializing state as utf-8: {error}"),
     })
 }
 
@@ -377,7 +427,7 @@ mod tests {
         let (_, score) = questions.next().unwrap();
         let (_, noul) = questions.next().unwrap();
         assert_eq!(
-            render_options(choice).0,
+            render_options(choice).options,
             [
                 "nil",
                 "empty",
@@ -389,9 +439,12 @@ mod tests {
                 "structured: {'flag': True}"
             ]
         );
-        assert_eq!(render_options(score).0, ["level 0: low", "level 1: high"]);
         assert_eq!(
-            render_options(noul).0,
+            render_options(score).options,
+            ["level 0: low", "level 1: high"]
+        );
+        assert_eq!(
+            render_options(noul).options,
             [
                 "false: no, the statement does not hold",
                 "true: yes, the statement holds"

@@ -23,9 +23,7 @@ fn pull_without_a_model_source_lists_the_one_s1gate_can_pull() {
 #[test]
 fn a_stored_checkpoint_is_listed_with_the_revision_it_holds() {
     let data_home = TempDir::new("cli-listing");
-    let checkpoint = data_home
-        .path()
-        .join("s1gate/models/convaiinnovations/laya");
+    let checkpoint = checkpoint_root(&data_home).join(fixture::NAME);
     fs::create_dir_all(&checkpoint).expect("the Checkpoint directory");
     fs::write(
         checkpoint.join("provenance.json"),
@@ -157,6 +155,7 @@ fn an_empty_model_store_verifies_silently() {
 
     assert_eq!(run.code, 0);
     assert!(run.stdout.is_empty());
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
 }
 
 #[test]
@@ -301,7 +300,7 @@ fn verify_validates_the_name_before_locating_the_store() {
 
 /// The Model Store root `data_home` holds, where a Checkpoint is written for the binary to find.
 fn checkpoint_root(data_home: &TempDir) -> std::path::PathBuf {
-    data_home.path().join("s1gate/models")
+    s1gate::store::store_root(Some(data_home.path()), None).expect("a store root")
 }
 
 #[test]
@@ -319,7 +318,11 @@ fn infer_rejects_invalid_json_without_writing_stdout() {
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("System One Call"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("invalid System One Call"),
+        "{}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -453,6 +456,7 @@ fn infer_rejects_an_unknown_question_type() {
 
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("ranking"), "{}", run.stderr);
     assert!(run.stderr.contains("choice"), "{}", run.stderr);
     assert!(run.stderr.contains("score"), "{}", run.stderr);
     assert!(run.stderr.contains("noul"), "{}", run.stderr);
@@ -686,9 +690,7 @@ fn infer_runs_a_real_laya_checkpoint() {
     );
 
     let data_home = TempDir::new("cli-laya-e2e");
-    let model = data_home
-        .path()
-        .join("s1gate/models/convaiinnovations/laya");
+    let model = checkpoint_root(&data_home).join(fixture::NAME);
     fs::create_dir_all(model.parent().expect("the model has a parent"))
         .expect("the test Model Store");
     std::os::unix::fs::symlink(&checkpoint, &model).expect("the checkpoint symlink");
@@ -746,7 +748,13 @@ fn run_in(data_home: &TempDir, args: &[&str]) -> Run {
         .output()
         .expect("the s1gate binary runs");
     Run {
-        code: output.status.code().expect("the binary exits"),
+        code: output.status.code().unwrap_or_else(|| {
+            panic!(
+                "the binary exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -766,15 +774,24 @@ fn run_in_with_input(data_home: &TempDir, args: &[&str], input: impl AsRef<[u8]>
         .stderr(Stdio::piped())
         .spawn()
         .expect("the s1gate binary runs");
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(input.as_ref())
-        .expect("the call is written");
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    if let Err(error) = stdin.write_all(input.as_ref()) {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "the call is written: {error}"
+        );
+    }
+    drop(stdin);
     let output = child.wait_with_output().expect("the s1gate process exits");
     Run {
-        code: output.status.code().expect("the binary exits"),
+        code: output.status.code().unwrap_or_else(|| {
+            panic!(
+                "the binary exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }

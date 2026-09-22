@@ -23,31 +23,45 @@ pub struct Store {
 
 impl Store {
     /// A store rooted at `root`; the caller owns the location.
-    pub fn at(root: impl Into<PathBuf>) -> Store {
-        Store { root: root.into() }
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
     /// The store at the location the environment names.
-    pub fn from_env() -> Result<Store> {
+    ///
+    /// # Errors
+    ///
+    /// Neither `XDG_DATA_HOME` nor `HOME` names a location: [`Error::NoStoreRoot`].
+    pub fn from_env() -> Result<Self> {
         let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        Ok(Store::at(store_root(
+        Ok(Self::at(store_root(
             xdg_data_home.as_deref(),
             home.as_deref(),
         )?))
     }
 
+    /// The directory the Checkpoints live below.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Where the Checkpoint of the Model Source `name` lives.
+    ///
+    /// # Errors
+    ///
+    /// `name` is not one `<owner>/<name>` pair of directory names: [`Error::InvalidName`].
     pub fn checkpoint_dir(&self, name: &str) -> Result<PathBuf> {
         let (owner, checkpoint) = segments(name)?;
         Ok(self.root.join(owner).join(checkpoint))
     }
 
     /// The Provenance `name` records, or `None` when it holds no Checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// `name` is not one `<owner>/<name>` pair of directory names ([`Error::InvalidName`]), the
+    /// record cannot be read, or it is not a Provenance.
     pub fn provenance(&self, name: &str) -> Result<Option<Provenance>> {
         let path = self.checkpoint_dir(name)?.join(Provenance::FILE_NAME);
         let json = match std::fs::read_to_string(&path) {
@@ -64,6 +78,11 @@ impl Store {
     /// record a Provenance. A missing store root holds no Checkpoint, and neither does a directory
     /// a Pull left incomplete — the record is written last. Entries that are not directories, and
     /// names that are not UTF-8, are not Checkpoints and are skipped.
+    ///
+    /// # Errors
+    ///
+    /// An entry of the store root cannot be read, or an entry that names a directory cannot be
+    /// inspected.
     pub fn checkpoint_names(&self) -> Result<Vec<String>> {
         let owners = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
@@ -92,7 +111,7 @@ impl Store {
                 let Some(checkpoint_name) = checkpoint_file_name.to_str() else {
                     continue;
                 };
-                if !checkpoint.path().join(Provenance::FILE_NAME).is_file() {
+                if !holds_provenance(&checkpoint.path())? {
                     continue;
                 }
                 names.push(format!("{owner_name}/{checkpoint_name}"));
@@ -104,6 +123,11 @@ impl Store {
 
     /// Record `provenance` as the Checkpoint of `name`, replacing any earlier record. Written
     /// through `provenance.json.part` and renamed, so a record on disk is always complete.
+    ///
+    /// # Errors
+    ///
+    /// `name` is not one `<owner>/<name>` pair of directory names ([`Error::InvalidName`]), or the
+    /// Checkpoint directory cannot be created, written, or renamed into place.
     pub fn record_provenance(&self, name: &str, provenance: &Provenance) -> Result<()> {
         let directory = self.checkpoint_dir(name)?;
         std::fs::create_dir_all(&directory)
@@ -116,6 +140,11 @@ impl Store {
     }
 
     /// Discard whatever `name` holds, so a Pull can store a different Checkpoint under it.
+    ///
+    /// # Errors
+    ///
+    /// `name` is not one `<owner>/<name>` pair of directory names ([`Error::InvalidName`]), or the
+    /// Checkpoint directory cannot be removed.
     pub fn discard_checkpoint(&self, name: &str) -> Result<()> {
         let directory = self.checkpoint_dir(name)?;
         match std::fs::remove_dir_all(&directory) {
@@ -129,6 +158,10 @@ impl Store {
 /// `$XDG_DATA_HOME/s1gate/models`, defaulting to `~/.local/share/s1gate/models` (ADR-0011). A
 /// relative `XDG_DATA_HOME` is not a valid path and is ignored, as the XDG Base Directory
 /// specification requires.
+///
+/// # Errors
+///
+/// Neither `xdg_data_home` nor `home` names a location: [`Error::NoStoreRoot`].
 pub fn store_root(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
     if let Some(data_home) = xdg_data_home.filter(|path| path.is_absolute()) {
         return Ok(data_home.join(STORE_PATH));
@@ -167,6 +200,17 @@ fn is_directory(entry: &std::fs::DirEntry) -> Result<bool> {
         Ok(metadata) => Ok(metadata.is_dir()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(Error::io("inspect", entry.path(), error)),
+    }
+}
+
+/// Whether `directory` records a Provenance. An entry that cannot be inspected is an error rather
+/// than a Checkpoint that is not one, so an unreadable store is never reported as an empty one.
+fn holds_provenance(directory: &Path) -> Result<bool> {
+    let record = directory.join(Provenance::FILE_NAME);
+    match std::fs::metadata(&record) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::io("inspect", &record, error)),
     }
 }
 
@@ -254,7 +298,9 @@ mod tests {
                 published: None,
             }],
         };
-        store.record_provenance("convaiinnovations/laya", &provenance).unwrap();
+        store
+            .record_provenance("convaiinnovations/laya", &provenance)
+            .unwrap();
         assert_eq!(
             store.provenance("convaiinnovations/laya").unwrap(),
             Some(provenance)

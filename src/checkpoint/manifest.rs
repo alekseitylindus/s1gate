@@ -2,13 +2,20 @@
 //! describes, derived before any weight is read (ADR-0005).
 
 use std::collections::BTreeMap;
+use std::fmt::{self, Write as _};
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
 use super::{AGENT_CONFIG, ENCODER_CONFIG, invalid};
+
+/// The most layers either configuration may declare. Both drive a loop that inserts about fifteen
+/// Manifest entries per layer, so a hostile or corrupt count is out-of-memory rather than an error
+/// unless it is rejected before the loop.
+const MAX_LAYERS: usize = 1024;
 
 #[derive(Debug, Deserialize)]
 struct EncoderConfig {
@@ -24,9 +31,98 @@ struct AgentConfig {
     act_costs: BTreeMap<String, serde_json::Value>,
 }
 
+/// A dtype safetensors defines. The weights header carries the dtype as text; parsing it once is
+/// what lets an expected dtype and an actual one be compared as values rather than as strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Dtype {
+    Bool,
+    U8,
+    I8,
+    F8E4M3,
+    F8E5M2,
+    U16,
+    I16,
+    F16,
+    Bf16,
+    U32,
+    I32,
+    F32,
+    U64,
+    I64,
+    F64,
+}
+
+impl Dtype {
+    /// The bytes one element of this dtype occupies.
+    pub(super) fn bytes(self) -> u64 {
+        match self {
+            Self::Bool | Self::U8 | Self::I8 | Self::F8E4M3 | Self::F8E5M2 => 1,
+            Self::U16 | Self::I16 | Self::F16 | Self::Bf16 => 2,
+            Self::U32 | Self::I32 | Self::F32 => 4,
+            Self::U64 | Self::I64 | Self::F64 => 8,
+        }
+    }
+
+    /// The name safetensors spells this dtype with.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Bool => "BOOL",
+            Self::U8 => "U8",
+            Self::I8 => "I8",
+            Self::F8E4M3 => "F8_E4M3",
+            Self::F8E5M2 => "F8_E5M2",
+            Self::U16 => "U16",
+            Self::I16 => "I16",
+            Self::F16 => "F16",
+            Self::Bf16 => "BF16",
+            Self::U32 => "U32",
+            Self::I32 => "I32",
+            Self::F32 => "F32",
+            Self::U64 => "U64",
+            Self::I64 => "I64",
+            Self::F64 => "F64",
+        }
+    }
+}
+
+impl fmt::Display for Dtype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A dtype name safetensors does not define.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UnknownDtype;
+
+impl FromStr for Dtype {
+    type Err = UnknownDtype;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "BOOL" => Self::Bool,
+            "U8" => Self::U8,
+            "I8" => Self::I8,
+            "F8_E4M3" => Self::F8E4M3,
+            "F8_E5M2" => Self::F8E5M2,
+            "U16" => Self::U16,
+            "I16" => Self::I16,
+            "F16" => Self::F16,
+            "BF16" => Self::Bf16,
+            "U32" => Self::U32,
+            "I32" => Self::I32,
+            "F32" => Self::F32,
+            "U64" => Self::U64,
+            "I64" => Self::I64,
+            "F64" => Self::F64,
+            _ => return Err(UnknownDtype),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Parameter {
-    pub(super) dtype: &'static str,
+    pub(super) dtype: Dtype,
     pub(super) shape: Vec<u64>,
 }
 
@@ -52,13 +148,20 @@ impl Manifest {
         directory: &Path,
         encoder: &EncoderConfig,
         agent: &AgentConfig,
-    ) -> Result<Manifest> {
+    ) -> Result<Self> {
         let encoder_config = directory.join(ENCODER_CONFIG);
         let agent_config = directory.join(AGENT_CONFIG);
         let hidden = dimension(&encoder_config, encoder.hidden_size)?;
         let intermediate = dimension(&encoder_config, encoder.intermediate_size)?;
         let vocab = dimension(&encoder_config, encoder.vocab_size)?;
         let layers = encoder.num_hidden_layers;
+        if layers > MAX_LAYERS {
+            return Err(invalid(&encoder_config, "num_hidden_layers is too large"));
+        }
+        let head_layers = agent.head_layers;
+        if head_layers > MAX_LAYERS {
+            return Err(invalid(&agent_config, "head_layers is too large"));
+        }
         let doubled_intermediate = intermediate
             .checked_mul(2)
             .ok_or_else(|| invalid(&encoder_config, "intermediate_size is too large"))?;
@@ -75,96 +178,112 @@ impl Manifest {
             .ok_or_else(|| invalid(&encoder_config, "hidden_size is too large"))?;
         let actions = dimension(&agent_config, agent.act_costs.len().saturating_add(1))?;
 
-        let mut manifest = Manifest::default();
-        manifest.add("temperature", "F32", vec![3]);
-        manifest.add("encoder.embeddings.norm.weight", "F16", vec![hidden]);
+        let mut manifest = Self::default();
+        manifest.add("temperature", Dtype::F32, vec![3]);
+        manifest.add("encoder.embeddings.norm.weight", Dtype::F16, vec![hidden]);
         manifest.add(
             "encoder.embeddings.tok_embeddings.weight",
-            "F16",
+            Dtype::F16,
             vec![vocab, hidden],
         );
-        manifest.add("encoder.final_norm.weight", "F16", vec![hidden]);
+        manifest.add("encoder.final_norm.weight", Dtype::F16, vec![hidden]);
+        // One layer-prefix buffer for both loops; only the per-parameter key is its own String.
+        let mut prefix = String::with_capacity(64);
         for layer in 0..layers {
-            let prefix = format!("encoder.layers.{layer}");
+            prefix.clear();
+            let _ = write!(prefix, "encoder.layers.{layer}");
             if layer > 0 {
-                manifest.add(&format!("{prefix}.attn_norm.weight"), "F16", vec![hidden]);
+                manifest.add(
+                    &format!("{prefix}.attn_norm.weight"),
+                    Dtype::F16,
+                    vec![hidden],
+                );
             }
             manifest.add(
                 &format!("{prefix}.attn.Wo.weight"),
-                "F16",
+                Dtype::F16,
                 vec![hidden, hidden],
             );
             manifest.add(
                 &format!("{prefix}.attn.Wqkv.weight"),
-                "F16",
+                Dtype::F16,
                 vec![tripled, hidden],
             );
             manifest.add(
                 &format!("{prefix}.mlp.Wi.weight"),
-                "F16",
+                Dtype::F16,
                 vec![doubled_intermediate, hidden],
             );
             manifest.add(
                 &format!("{prefix}.mlp.Wo.weight"),
-                "F16",
+                Dtype::F16,
                 vec![hidden, intermediate],
             );
-            manifest.add(&format!("{prefix}.mlp_norm.weight"), "F16", vec![hidden]);
+            manifest.add(
+                &format!("{prefix}.mlp_norm.weight"),
+                Dtype::F16,
+                vec![hidden],
+            );
         }
-        for layer in 0..agent.head_layers {
-            let prefix = format!("head.layers.{layer}");
+        for layer in 0..head_layers {
+            prefix.clear();
+            let _ = write!(prefix, "head.layers.{layer}");
             manifest.add(
                 &format!("{prefix}.linear1.weight"),
-                "F16",
+                Dtype::F16,
                 vec![head_width, hidden],
             );
-            manifest.add(&format!("{prefix}.linear1.bias"), "F16", vec![head_width]);
+            manifest.add(
+                &format!("{prefix}.linear1.bias"),
+                Dtype::F16,
+                vec![head_width],
+            );
             manifest.add(
                 &format!("{prefix}.linear2.weight"),
-                "F16",
+                Dtype::F16,
                 vec![hidden, head_width],
             );
-            manifest.add(&format!("{prefix}.linear2.bias"), "F16", vec![hidden]);
+            manifest.add(&format!("{prefix}.linear2.bias"), Dtype::F16, vec![hidden]);
             for norm in ["norm1", "norm2"] {
-                manifest.add(&format!("{prefix}.{norm}.weight"), "F16", vec![hidden]);
-                manifest.add(&format!("{prefix}.{norm}.bias"), "F16", vec![hidden]);
+                manifest.add(&format!("{prefix}.{norm}.weight"), Dtype::F16, vec![hidden]);
+                manifest.add(&format!("{prefix}.{norm}.bias"), Dtype::F16, vec![hidden]);
             }
             manifest.add(
                 &format!("{prefix}.self_attn.in_proj_weight"),
-                "F16",
+                Dtype::F16,
                 vec![tripled, hidden],
             );
             manifest.add(
                 &format!("{prefix}.self_attn.in_proj_bias"),
-                "F16",
+                Dtype::F16,
                 vec![tripled],
             );
             manifest.add(
                 &format!("{prefix}.self_attn.out_proj.weight"),
-                "F16",
+                Dtype::F16,
                 vec![hidden, hidden],
             );
             manifest.add(
                 &format!("{prefix}.self_attn.out_proj.bias"),
-                "F16",
+                Dtype::F16,
                 vec![hidden],
             );
         }
-        manifest.add("type_emb.weight", "F16", vec![3, hidden]);
-        manifest.add("scorer.0.weight", "F16", vec![hidden]);
-        manifest.add("scorer.0.bias", "F16", vec![hidden]);
-        manifest.add("scorer.1.weight", "F16", vec![hidden, hidden]);
-        manifest.add("scorer.1.bias", "F16", vec![hidden]);
-        manifest.add("scorer.3.weight", "F16", vec![1, hidden]);
-        manifest.add("scorer.3.bias", "F16", vec![1]);
-        manifest.add("act_head.0.weight", "F16", vec![256, act_input]);
-        manifest.add("act_head.0.bias", "F16", vec![256]);
-        manifest.add("act_head.2.weight", "F16", vec![actions, 256]);
-        manifest.add("act_head.2.bias", "F16", vec![actions]);
+        manifest.add("type_emb.weight", Dtype::F16, vec![3, hidden]);
+        manifest.add("scorer.0.weight", Dtype::F16, vec![hidden]);
+        manifest.add("scorer.0.bias", Dtype::F16, vec![hidden]);
+        manifest.add("scorer.1.weight", Dtype::F16, vec![hidden, hidden]);
+        manifest.add("scorer.1.bias", Dtype::F16, vec![hidden]);
+        manifest.add("scorer.3.weight", Dtype::F16, vec![1, hidden]);
+        manifest.add("scorer.3.bias", Dtype::F16, vec![1]);
+        manifest.add("act_head.0.weight", Dtype::F16, vec![256, act_input]);
+        manifest.add("act_head.0.bias", Dtype::F16, vec![256]);
+        manifest.add("act_head.2.weight", Dtype::F16, vec![actions, 256]);
+        manifest.add("act_head.2.bias", Dtype::F16, vec![actions]);
         Ok(manifest)
     }
 
-    fn add(&mut self, name: &str, dtype: &'static str, shape: Vec<u64>) {
+    fn add(&mut self, name: &str, dtype: Dtype, shape: Vec<u64>) {
         self.parameters
             .insert(name.to_string(), Parameter { dtype, shape });
     }

@@ -18,7 +18,7 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     // Judging the call is a Backend's job; this command owns the input and error contract alone.
-    let _call = read_call()?;
+    let call = read_call()?;
     let source = checkpoint_name(&args.name)?;
     let name = source.repo;
     let store = Store::from_env()?;
@@ -27,7 +27,7 @@ pub fn run(args: Args) -> Result<()> {
             name: name.to_string(),
         });
     }
-    let result = laya::run(&store, source, &_call)?;
+    let result = laya::run(&store, source, &call)?;
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(&mut stdout, &result).map_err(|error| Error::Inference {
         message: format!("writing result: {error}"),

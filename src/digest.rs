@@ -4,6 +4,9 @@
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 
+/// The most `blob <size>\0` takes: the word, the longest decimal `u64` and the NUL.
+const BLOB_PREFIX: usize = 5 + 20 + 1;
+
 /// Hashes the bytes Pull streams for one Checkpoint file, or the bytes verification reads back.
 ///
 /// The sha256 is always computed — it is what the Provenance record stores. The git blob object id
@@ -18,19 +21,30 @@ pub struct Digest {
 
 impl Digest {
     /// `blob_size` is the announced size of the file, when the Model Source announced one.
-    pub fn new(blob_size: Option<u64>) -> Digest {
+    pub fn new(blob_size: Option<u64>) -> Self {
+        use std::io::Write as _;
+
         let git_blob = blob_size.map(|size| {
+            // The size prefix is a handful of bytes, so it is written into a stack buffer and
+            // hashed from there rather than into a String of its own per file.
+            let mut prefix = [0u8; BLOB_PREFIX];
+            let written = {
+                let mut cursor = &mut prefix[..];
+                let _ = write!(cursor, "blob {size}\0");
+                BLOB_PREFIX - cursor.len()
+            };
             let mut sha1 = Sha1::new();
-            sha1.update(format!("blob {size}\0").as_bytes());
+            sha1.update(&prefix[..written]);
             sha1
         });
-        Digest {
+        Self {
             sha256: Sha256::new(),
             git_blob,
             len: 0,
         }
     }
 
+    /// Hash `bytes`, the next bytes of the file, in the order they are read.
     pub fn update(&mut self, bytes: &[u8]) {
         self.sha256.update(bytes);
         if let Some(sha1) = &mut self.git_blob {
@@ -44,10 +58,12 @@ impl Digest {
         self.len
     }
 
+    /// Whether no byte has been hashed yet.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// The sha256 of the bytes hashed so far, lowercase hexadecimal.
     pub fn sha256(&self) -> String {
         hex(&self.sha256.clone().finalize())
     }

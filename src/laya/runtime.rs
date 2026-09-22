@@ -1,6 +1,8 @@
 //! Candle weight loading and the Laya forward pass.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use candle_core::safetensors::Load as _;
@@ -18,7 +20,7 @@ use super::prompt::Prepared;
 /// the only module that talks to Candle, so the error type stays free of it.
 impl From<candle_core::Error> for Error {
     fn from(error: candle_core::Error) -> Self {
-        Error::Inference {
+        Self::Inference {
             message: error.to_string(),
         }
     }
@@ -28,7 +30,7 @@ impl From<candle_core::Error> for Error {
 /// selection is not allowed. It dominates any score the Checkpoint produces, so it softens and
 /// normalizes to exactly zero.
 const MASK_FILL: f32 = -1e4;
-/// The LayerNorm epsilon the decision head was trained with.
+/// The `LayerNorm` epsilon the decision head was trained with.
 const LN_EPS: f32 = 1e-5;
 
 /// One Checkpoint's parameters, materialized as F32: the published weights are 16-bit, and every
@@ -39,10 +41,41 @@ pub(super) struct Weights {
 }
 
 impl Weights {
+    #[inline]
     fn get(&self, name: &str) -> Result<&Tensor> {
         self.values.get(name).ok_or_else(|| Error::Inference {
             message: format!("missing materialized parameter `{name}`"),
         })
+    }
+}
+
+/// One reusable buffer holding a layer's parameter names: naming the parameters of a layer costs no
+/// allocation each, which matters because the encoder stack looks up dozens per layer.
+struct Names {
+    buffer: String,
+    prefix: usize,
+}
+
+impl Names {
+    fn new() -> Self {
+        Self {
+            buffer: String::with_capacity(64),
+            prefix: 0,
+        }
+    }
+
+    /// Name the layer `prefix` addresses, e.g. `encoder.layers.3` or `head.layers.0`.
+    fn layer(&mut self, prefix: &str, layer: usize) {
+        self.buffer.clear();
+        write!(self.buffer, "{prefix}{layer}").expect("a String never fails");
+        self.prefix = self.buffer.len();
+    }
+
+    /// The current layer's parameter `suffix`, e.g. `.attn.Wqkv.weight`.
+    fn parameter<'a>(&mut self, weights: &'a Weights, suffix: &str) -> Result<&'a Tensor> {
+        self.buffer.truncate(self.prefix);
+        self.buffer.push_str(suffix);
+        weights.get(&self.buffer)
     }
 }
 
@@ -53,11 +86,12 @@ pub(super) fn load_weights(path: &Path) -> Result<Weights> {
     // SAFETY: `MmapedSafetensors` requires the mapped file to keep the bytes it was opened with.
     // The store is read-only to the runtime (ADR-0003), and `verify` has just re-hashed this file
     // against its Provenance, so it is the Checkpoint the Model Source published.
-    let file = unsafe { candle_core::safetensors::MmapedSafetensors::new(path) }.map_err(|error| {
-        Error::Inference {
-            message: format!("loading safetensors `{}`: {error}", path.display()),
-        }
-    })?;
+    let file =
+        unsafe { candle_core::safetensors::MmapedSafetensors::new(path) }.map_err(|error| {
+            Error::Inference {
+                message: format!("loading safetensors `{}`: {error}", path.display()),
+            }
+        })?;
     let mut values = HashMap::new();
     for (name, view) in file.tensors() {
         let value = view
@@ -73,6 +107,7 @@ pub(super) fn load_weights(path: &Path) -> Result<Weights> {
 
 /// A projection of every leading position at once: the leading dimensions are folded into the
 /// rows of a single matrix multiplication, which is what a rank-3 input means here.
+#[inline]
 fn linear(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
     let dims = x.dims();
     let mut projected = dims[..dims.len() - 1].to_vec();
@@ -87,16 +122,21 @@ fn linear(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> 
     }
 }
 
-/// Rotary position embeddings, in the layout this Checkpoint's `default` RoPE uses: the head is
+/// Rotary position embeddings, in the layout this Checkpoint's `default` `RoPE` uses: the head is
 /// split in half and each half is rotated against the other at the frequency `base` sets.
 fn rope(x: &Tensor, base: f32) -> Result<Tensor> {
     let (_, _, length, head_width) = x.dims4()?;
     let half = head_width / 2;
+    // A half-index's frequency depends only on the index, so it is computed once per head width
+    // rather than for every position of every attention call.
+    let frequency: Vec<f32> = (0..half)
+        .map(|index| base.powf(2.0 * index as f32 / head_width as f32))
+        .collect();
     let mut cosine = Vec::with_capacity(length * half);
     let mut sine = Vec::with_capacity(length * half);
     for position in 0..length {
-        for index in 0..half {
-            let angle = position as f32 / base.powf(2.0 * index as f32 / head_width as f32);
+        for frequency in &frequency {
+            let angle = position as f32 / frequency;
             cosine.push(angle.cos());
             sine.push(angle.sin());
         }
@@ -114,6 +154,13 @@ fn rope(x: &Tensor, base: f32) -> Result<Tensor> {
     )?)
 }
 
+/// One attention layer's projection: the weight, and the bias it may carry. Both projections a
+/// layer applies share this shape.
+struct Projection<'a> {
+    weight: &'a Tensor,
+    bias: Option<&'a Tensor>,
+}
+
 /// One attention layer: scaled `QK^T`, the mask added, softmax, times V.
 ///
 /// `rope_base` is the only difference between an encoder layer, which carries positional
@@ -121,22 +168,21 @@ fn rope(x: &Tensor, base: f32) -> Result<Tensor> {
 /// key is not allowed, and broadcast over the heads.
 fn attention(
     x: &Tensor,
-    qkv_weight: &Tensor,
-    qkv_bias: Option<&Tensor>,
-    out_weight: &Tensor,
-    out_bias: Option<&Tensor>,
-    heads: usize,
+    qkv: Projection<'_>,
+    out: Projection<'_>,
+    heads: NonZeroUsize,
     rope_base: Option<f32>,
     mask: &Tensor,
 ) -> Result<Tensor> {
     let (batch, length, hidden) = x.dims3()?;
-    if heads == 0 || hidden % heads != 0 {
+    let heads = heads.get();
+    if !hidden.is_multiple_of(heads) {
         return Err(Error::Inference {
-            message: "hidden size must be divisible by a non-zero attention head count".to_string(),
+            message: "hidden size must be divisible by the attention head count".to_string(),
         });
     }
     let head_width = hidden / heads;
-    let qkv = linear(x, qkv_weight, qkv_bias)?.reshape((batch, length, 3, heads, head_width))?;
+    let qkv = linear(x, qkv.weight, qkv.bias)?.reshape((batch, length, 3, heads, head_width))?;
     let project = |index: usize| -> Result<Tensor> {
         Ok(qkv
             .narrow(2, index, 1)?
@@ -162,16 +208,18 @@ fn attention(
         .transpose(1, 2)?
         .contiguous()?
         .reshape((batch, length, hidden))?;
-    linear(&attended, out_weight, out_bias)
+    linear(&attended, out.weight, out.bias)
 }
 
-/// ModernBERT: token embeddings, the encoder stack, and the final norm.
+/// The `ModernBERT` encoder: token embeddings, the encoder stack, and the final norm.
 fn encoder(
     config: &EncoderConfig,
     weights: &Weights,
     input_ids: &Tensor,
     masks: &Masks,
     zero_bias: &Tensor,
+    names: &mut Names,
+    heads: NonZeroUsize,
 ) -> Result<Tensor> {
     let (batch, length) = input_ids.dims2()?;
     let embeddings = weights.get("encoder.embeddings.tok_embeddings.weight")?;
@@ -185,14 +233,14 @@ fn encoder(
         config.norm_eps,
     )?;
     for layer in 0..config.num_hidden_layers {
-        let prefix = format!("encoder.layers.{layer}");
+        names.layer("encoder.layers.", layer);
         // Layer zero normalizes nothing: the Checkpoint has no attention norm for it.
         let normalized = if layer == 0 {
             x.clone()
         } else {
             ops::layer_norm(
                 &x,
-                weights.get(&format!("{prefix}.attn_norm.weight"))?,
+                names.parameter(weights, ".attn_norm.weight")?,
                 zero_bias,
                 config.norm_eps,
             )?
@@ -207,24 +255,28 @@ fn encoder(
         };
         let attended = attention(
             &normalized,
-            weights.get(&format!("{prefix}.attn.Wqkv.weight"))?,
-            None,
-            weights.get(&format!("{prefix}.attn.Wo.weight"))?,
-            None,
-            config.num_attention_heads,
+            Projection {
+                weight: names.parameter(weights, ".attn.Wqkv.weight")?,
+                bias: None,
+            },
+            Projection {
+                weight: names.parameter(weights, ".attn.Wo.weight")?,
+                bias: None,
+            },
+            heads,
             Some(config.rope_base(kind)?),
             mask,
         )?;
         x = x.add(&attended)?;
         let normalized = ops::layer_norm(
             &x,
-            weights.get(&format!("{prefix}.mlp_norm.weight"))?,
+            names.parameter(weights, ".mlp_norm.weight")?,
             zero_bias,
             config.norm_eps,
         )?;
         let gated = linear(
             &normalized,
-            weights.get(&format!("{prefix}.mlp.Wi.weight"))?,
+            names.parameter(weights, ".mlp.Wi.weight")?,
             None,
         )?;
         // GeGLU: the projection holds the activation input and its gate side by side.
@@ -234,7 +286,7 @@ fn encoder(
         let activated = activation.mul(&gate)?;
         let projected = linear(
             &activated,
-            weights.get(&format!("{prefix}.mlp.Wo.weight"))?,
+            names.parameter(weights, ".mlp.Wo.weight")?,
             None,
         )?;
         x = x.add(&projected)?;
@@ -247,26 +299,32 @@ fn encoder(
     )?)
 }
 
-/// One decision-head layer: self attention without positional encoding, then a ReLU feed-forward.
+/// One decision-head layer: self attention without positional encoding, then a `ReLU` feed-forward.
 fn head_layer(
     x: &Tensor,
-    prefix: &str,
+    layer: usize,
     weights: &Weights,
-    heads: usize,
+    heads: NonZeroUsize,
     mask: &Tensor,
+    names: &mut Names,
 ) -> Result<Tensor> {
+    names.layer("head.layers.", layer);
     let normalized = ops::layer_norm(
         x,
-        weights.get(&format!("{prefix}.norm1.weight"))?,
-        weights.get(&format!("{prefix}.norm1.bias"))?,
+        names.parameter(weights, ".norm1.weight")?,
+        names.parameter(weights, ".norm1.bias")?,
         LN_EPS,
     )?;
     let attended = attention(
         &normalized,
-        weights.get(&format!("{prefix}.self_attn.in_proj_weight"))?,
-        Some(weights.get(&format!("{prefix}.self_attn.in_proj_bias"))?),
-        weights.get(&format!("{prefix}.self_attn.out_proj.weight"))?,
-        Some(weights.get(&format!("{prefix}.self_attn.out_proj.bias"))?),
+        Projection {
+            weight: names.parameter(weights, ".self_attn.in_proj_weight")?,
+            bias: Some(names.parameter(weights, ".self_attn.in_proj_bias")?),
+        },
+        Projection {
+            weight: names.parameter(weights, ".self_attn.out_proj.weight")?,
+            bias: Some(names.parameter(weights, ".self_attn.out_proj.bias")?),
+        },
         heads,
         None,
         mask,
@@ -274,20 +332,20 @@ fn head_layer(
     let x = x.add(&attended)?;
     let normalized = ops::layer_norm(
         &x,
-        weights.get(&format!("{prefix}.norm2.weight"))?,
-        weights.get(&format!("{prefix}.norm2.bias"))?,
+        names.parameter(weights, ".norm2.weight")?,
+        names.parameter(weights, ".norm2.bias")?,
         LN_EPS,
     )?;
     let feed = linear(
         &normalized,
-        weights.get(&format!("{prefix}.linear1.weight"))?,
-        Some(weights.get(&format!("{prefix}.linear1.bias"))?),
+        names.parameter(weights, ".linear1.weight")?,
+        Some(names.parameter(weights, ".linear1.bias")?),
     )?;
     let feed = feed.relu()?;
     let feed = linear(
         &feed,
-        weights.get(&format!("{prefix}.linear2.weight"))?,
-        Some(weights.get(&format!("{prefix}.linear2.bias"))?),
+        names.parameter(weights, ".linear2.weight")?,
+        Some(names.parameter(weights, ".linear2.bias")?),
     )?;
     Ok(x.add(&feed)?)
 }
@@ -297,8 +355,11 @@ fn head_layer(
 /// first position, which [`score_markers`] then fills in.
 fn gather_markers(hidden: &Tensor, indices: &Tensor, marker_slots: usize) -> Result<Tensor> {
     let (batch, length, width) = hidden.dims3()?;
+    let rows = batch.checked_mul(length).ok_or_else(|| Error::Inference {
+        message: "input batch is too large".to_string(),
+    })?;
     Ok(hidden
-        .reshape((batch * length, width))?
+        .reshape((rows, width))?
         .index_select(indices, 0)?
         .reshape((batch, marker_slots, width))?)
 }
@@ -324,7 +385,10 @@ fn score_markers(states: &Tensor, mask: &Tensor, weights: &Weights) -> Result<Te
         Some(weights.get("scorer.3.bias")?),
     )?
     .squeeze(2)?;
-    Ok(mask.where_cond(&score, &Tensor::full(MASK_FILL, mask.shape(), mask.device())?)?)
+    Ok(mask.where_cond(
+        &score,
+        &Tensor::full(MASK_FILL, mask.shape(), mask.device())?,
+    )?)
 }
 
 /// What every layer of one forward pass adds to its scores: `keys` marks the positions that carry
@@ -348,17 +412,19 @@ impl Masks {
             })?;
         let radius = window / 2;
         let mut sliding = vec![0f32; cells];
-        for row in 0..batch {
-            for query in 0..length {
-                let valid_query = valid[row * length + query];
-                for key in 0..length {
-                    // A padded key is never attended to. A real query of a sliding layer reaches
-                    // `radius` positions either side of itself; a padded query reaches every key
-                    // its own mask allows, because its output is never read.
-                    if !valid[row * length + key]
-                        || (valid_query && query.abs_diff(key) > radius)
-                    {
-                        sliding[(row * length + query) * length + key] = MASK_FILL;
+        // `chunks_exact_mut` needs a non-zero chunk: a batch of empty Questions masks nothing.
+        if length > 0 {
+            for (row, plane) in sliding.chunks_exact_mut(length * length).enumerate() {
+                let valid_row = &valid[row * length..][..length];
+                for (query, cell_row) in plane.chunks_exact_mut(length).enumerate() {
+                    let valid_query = valid_row[query];
+                    for (key, cell) in cell_row.iter_mut().enumerate() {
+                        // A padded key is never attended to. A real query of a sliding layer
+                        // reaches `radius` positions either side of itself; a padded query reaches
+                        // every key its own mask allows, because its output is never read.
+                        if !valid_row[key] || (valid_query && query.abs_diff(key) > radius) {
+                            *cell = MASK_FILL;
+                        }
                     }
                 }
             }
@@ -377,13 +443,30 @@ impl Masks {
     }
 }
 
+/// The per-Question rows one forward pass returns: the Marker logits, and the Action weights
+/// beside them, share this shape, one row per Question of the System One Call.
+pub(super) type Scores = Vec<Vec<f32>>;
+
+/// What one forward pass returns: the Marker logits of every Question, and its Action weights.
+pub(super) struct Forward {
+    pub(super) logits: Scores,
+    pub(super) actions: Scores,
+}
+
+/// Judge every Question of one System One Call in a single forward pass.
+///
+/// # Errors
+///
+/// The padded batch is too large to address, a Question's Marker position or Question Type lies
+/// outside the batch, the Checkpoint is missing a materialized parameter, or the pass produces a
+/// value that is not finite.
 pub(super) fn forward(
     config: &EncoderConfig,
     agent: &AgentConfig,
     weights: &Weights,
     prepared: &[Prepared],
     special: &SpecialTokens,
-) -> Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
+) -> Result<Forward> {
     let count = prepared.len();
     let length = prepared
         .iter()
@@ -406,37 +489,67 @@ pub(super) fn forward(
             message: "input batch is too large".to_string(),
         });
     }
+    let slots = count
+        .checked_mul(marker_slots)
+        .ok_or_else(|| Error::Inference {
+            message: "input batch is too large".to_string(),
+        })?;
     let mut ids = vec![special.pad; cells];
     let mut valid = vec![false; cells];
-    let mut marker_flat = vec![0u32; count * marker_slots];
-    let mut marker_mask = vec![0u8; count * marker_slots];
+    let mut marker_flat = vec![0u32; slots];
+    let mut marker_mask = vec![0u8; slots];
     let mut kinds = Vec::with_capacity(count);
     for (row, item) in prepared.iter().enumerate() {
-        let base = row * length;
+        let offset = row * length;
         let tokens = item.sequence.ids.len();
-        ids[base..base + tokens].copy_from_slice(&item.sequence.ids);
-        valid[base..base + tokens].fill(true);
+        ids[offset..offset + tokens].copy_from_slice(&item.sequence.ids);
+        valid[offset..offset + tokens].fill(true);
+        // The batch fits in u32, so `base + position` addresses a position of this Question.
+        let base = u32::try_from(offset).map_err(|_| Error::Inference {
+            message: "input batch is too large".to_string(),
+        })?;
         for (option, marker) in item.sequence.markers.iter().enumerate() {
             let position = u32::try_from(*marker).map_err(|_| Error::Inference {
-                message: "Marker position exceeds the batch".to_string(),
+                message: "marker position exceeds the batch".to_string(),
             })?;
-            // The batch fits in u32, so `base + position` addresses a position of this Question.
-            marker_flat[row * marker_slots + option] = base as u32 + position;
+            marker_flat[row * marker_slots + option] = base + position;
             marker_mask[row * marker_slots + option] = 1;
         }
-        kinds.push(u32::try_from(item.kind.index()).map_err(|_| Error::Inference {
-            message: "Question Type is outside the type embedding".to_string(),
-        })?);
+        kinds.push(
+            u32::try_from(item.kind.index()).map_err(|_| Error::Inference {
+                message: "question type is outside the type embedding".to_string(),
+            })?,
+        );
     }
     let device = Device::Cpu;
     let input_ids = Tensor::from_vec(ids, (count, length), &device)?;
-    let marker_flat = Tensor::from_vec(marker_flat, (count * marker_slots,), &device)?;
+    let marker_flat = Tensor::from_vec(marker_flat, (slots,), &device)?;
     let marker_mask = Tensor::from_vec(marker_mask, (count, marker_slots), &device)?;
     let kinds = Tensor::from_vec(kinds, (count,), &device)?;
     let masks = Masks::new(&valid, count, length, config.local_attention)?;
     let zero_bias = Tensor::zeros(config.hidden_size, DType::F32, &device)?;
 
-    let hidden = encoder(config, weights, &input_ids, &masks, &zero_bias)?;
+    // Both head counts are non-zero by construction: `validate_config` rejects a Checkpoint whose
+    // dimensions would make either one zero.
+    let encoder_heads =
+        NonZeroUsize::new(config.num_attention_heads).ok_or_else(|| Error::Inference {
+            message: "attention head count must not be zero".to_string(),
+        })?;
+    let decision_heads =
+        NonZeroUsize::new(config.hidden_size / 64).ok_or_else(|| Error::Inference {
+            message: "hidden size is too small for the decision head".to_string(),
+        })?;
+    let mut names = Names::new();
+
+    let hidden = encoder(
+        config,
+        weights,
+        &input_ids,
+        &masks,
+        &zero_bias,
+        &mut names,
+        encoder_heads,
+    )?;
     let type_embedding = weights
         .get("type_emb.weight")?
         .index_select(&kinds, 0)?
@@ -445,10 +558,11 @@ pub(super) fn forward(
     for layer in 0..agent.head_layers {
         hidden = head_layer(
             &hidden,
-            &format!("head.layers.{layer}"),
+            layer,
             weights,
-            config.hidden_size / 64,
+            decision_heads,
             &masks.keys,
+            &mut names,
         )?;
     }
 
@@ -456,8 +570,9 @@ pub(super) fn forward(
     let logits = score_markers(&states, &marker_mask, weights)?;
     let probabilities = ops::softmax_last_dim(&logits)?;
     let (sorted, _) = probabilities.sort_last_dim(true)?;
-    let top = sorted.narrow(1, marker_slots - 1, 1)?;
-    let runner_up = sorted.narrow(1, marker_slots - 2, 1)?;
+    let width = sorted.dim(1)?;
+    let top = sorted.narrow(1, width.saturating_sub(1), 1)?;
+    let runner_up = sorted.narrow(1, width.saturating_sub(2), 1)?;
     // The features read the Options a Question actually has, which is what its Markers mark.
     let options = marker_mask.sum_keepdim(1)?.to_dtype(DType::F32)?;
     let entropy = probabilities
@@ -496,7 +611,7 @@ pub(super) fn forward(
             message: "model produced non-finite output".to_string(),
         });
     }
-    Ok((logits, actions))
+    Ok(Forward { logits, actions })
 }
 
 #[cfg(test)]
@@ -505,16 +620,14 @@ mod tests {
 
     use super::*;
     use crate::call::QuestionType;
-    use crate::laya::prompt::{Prepared, Sequence};
+    use crate::laya::prompt::{Prepared, Responses, Sequence};
 
     /// A tensor of `shape` from a generator seeded by the shape alone, so a parameter holds the
     /// same numbers in every test that builds it.
     fn tensor(shape: &[usize]) -> Tensor {
-        let mut state = shape
-            .iter()
-            .fold(0x2545_f491_4f6c_dd1du64, |state, dim| {
-                state.wrapping_mul(0x1000_0000_01b3) ^ *dim as u64
-            });
+        let mut state = shape.iter().fold(0x2545_f491_4f6c_dd1du64, |state, dim| {
+            state.wrapping_mul(0x1000_0000_01b3) ^ *dim as u64
+        });
         let values = (0..shape.iter().product::<usize>())
             .map(|_| {
                 state = state
@@ -618,9 +731,11 @@ mod tests {
                 markers: markers.to_vec(),
             },
             kind,
-            options: markers.iter().map(|marker| format!("option {marker}")).collect(),
-            labels: Vec::new(),
-            levels: Vec::new(),
+            options: markers
+                .iter()
+                .map(|marker| format!("option {marker}"))
+                .collect(),
+            responses: Responses::Unnamed,
         }
     }
 
@@ -734,16 +849,27 @@ mod tests {
         let wide = || question(QuestionType::Choice, &[5, 6, 7, 8], &[1, 2]);
         let narrow = || question(QuestionType::Choice, &[9, 10, 11], &[0, 1, 2]);
 
-        let (batched, _) =
-            forward(&config, &agent, &weights, &[wide(), narrow()], &special).unwrap();
-        let (wide_alone, _) =
-            forward(&config, &agent, &weights, &[wide()], &special).unwrap();
-        let (narrow_alone, _) =
-            forward(&config, &agent, &weights, &[narrow()], &special).unwrap();
+        let Forward {
+            logits: batched, ..
+        } = forward(&config, &agent, &weights, &[wide(), narrow()], &special).unwrap();
+        let Forward {
+            logits: wide_alone, ..
+        } = forward(&config, &agent, &weights, &[wide()], &special).unwrap();
+        let Forward {
+            logits: narrow_alone,
+            ..
+        } = forward(&config, &agent, &weights, &[narrow()], &special).unwrap();
 
         assert_eq!(batched.len(), 2);
-        assert_eq!(batched[0].len(), 3, "the batch is as wide as its widest Question");
-        assert_eq!(batched[0][2], MASK_FILL, "the extra slot belongs to no Option");
+        assert_eq!(
+            batched[0].len(),
+            3,
+            "the batch is as wide as its widest Question"
+        );
+        assert_eq!(
+            batched[0][2], MASK_FILL,
+            "the extra slot belongs to no Option"
+        );
         for (value, alone) in batched[0]
             .iter()
             .zip(&wide_alone[0])

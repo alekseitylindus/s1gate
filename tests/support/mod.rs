@@ -10,8 +10,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use sha1::Sha1;
@@ -19,9 +20,12 @@ use sha2::{Digest as _, Sha256};
 
 pub mod fixture;
 
+/// The Model Source stand-in: a loopback server with the revision, redirect and etag behaviour
+/// Pull expects.
 pub struct FakeSource {
     port: u16,
     state: Arc<Mutex<State>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 struct State {
@@ -30,6 +34,17 @@ struct State {
     refs: BTreeMap<String, String>,
     commits: BTreeMap<String, Vec<ServedFile>>,
     requests: Vec<Request>,
+}
+
+/// How the Model Source answers a request for one of its files.
+#[derive(Clone, Copy, Debug)]
+enum Presence {
+    /// Do not publish the file at all.
+    Absent,
+    /// Redirect to the presigned transfer, as the Model Source does.
+    Redirect,
+    /// Serve the file's bytes itself.
+    Direct,
 }
 
 /// One file the Model Source publishes.
@@ -41,13 +56,15 @@ pub struct ServedFile {
     announce_size: bool,
     truncate_at: Option<usize>,
     served_commit: Option<String>,
-    absent: bool,
-    direct: bool,
+    presence: Presence,
 }
 
+/// One request the Model Source received.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// The request target, path and query, as it arrived.
     pub target: String,
+    /// The request headers, in arrival order.
     pub headers: Vec<(String, String)>,
 }
 
@@ -61,7 +78,8 @@ impl Request {
 }
 
 impl FakeSource {
-    pub fn new(repo: &str) -> FakeSource {
+    /// Serve `repo` on a loopback port until the `FakeSource` is dropped.
+    pub fn new(repo: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
         let port = listener.local_addr().expect("a bound address").port();
         let state = Arc::new(Mutex::new(State {
@@ -72,16 +90,26 @@ impl FakeSource {
             requests: Vec::new(),
         }));
         let server_state = Arc::clone(&state);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
             for stream in listener.incoming() {
+                if server_shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
                 let Ok(stream) = stream else { break };
                 let state = Arc::clone(&server_state);
                 thread::spawn(move || serve(stream, state));
             }
         });
-        FakeSource { port, state }
+        Self {
+            port,
+            state,
+            shutdown,
+        }
     }
 
+    /// The URL a test points its `Hub` at.
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -99,11 +127,12 @@ impl FakeSource {
             .insert(name.to_string(), commit.to_string());
     }
 
-    /// Make `commit` the head of the default branch.
-    pub fn set_default_branch(&self, name: &str) {
-        self.state.lock().default_branch = name.to_string();
+    /// Name the revision the default branch resolves to.
+    pub fn set_default_branch(&self, branch: &str) {
+        self.state.lock().default_branch = branch.to_string();
     }
 
+    /// The requests received so far, in arrival order.
     pub fn requests(&self) -> Vec<Request> {
         self.state.lock().requests.clone()
     }
@@ -116,6 +145,7 @@ impl FakeSource {
             .collect()
     }
 
+    /// The bytes the Model Source publishes as `commit`, by path.
     pub fn bodies(&self, commit: &str) -> BTreeMap<String, Vec<u8>> {
         self.state
             .lock()
@@ -131,68 +161,74 @@ impl FakeSource {
     }
 }
 
+impl Drop for FakeSource {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Wake the accept loop so it observes the flag and returns.
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
 impl ServedFile {
     /// A file the Model Source tracks in git, so it publishes a git blob object id.
-    pub fn json(path: &str, body: &str) -> ServedFile {
-        ServedFile {
+    pub fn json(path: &str, body: &str) -> Self {
+        Self {
             path: path.to_string(),
             etag: Some(git_blob_sha1(body.as_bytes())),
             body: body.as_bytes().to_vec(),
             announce_size: false,
             truncate_at: None,
             served_commit: None,
-            absent: false,
-            direct: false,
+            presence: Presence::Redirect,
         }
     }
 
     /// A file the Model Source holds in LFS, so it publishes a sha256 and a linked size.
-    pub fn lfs(path: &str, body: impl Into<Vec<u8>>) -> ServedFile {
+    pub fn lfs(path: &str, body: impl Into<Vec<u8>>) -> Self {
         let body = body.into();
-        ServedFile {
+        Self {
             path: path.to_string(),
             etag: Some(sha256(&body)),
             body,
             announce_size: true,
             truncate_at: None,
             served_commit: None,
-            absent: false,
-            direct: false,
+            presence: Presence::Redirect,
         }
     }
 
     /// Advertise `etag` instead of the checksum of the bytes — a corrupt upload.
-    pub fn advertising(mut self, etag: &str) -> ServedFile {
+    pub fn advertising(mut self, etag: &str) -> Self {
         self.etag = Some(etag.to_string());
         self
     }
 
     /// Advertise no checksum at all.
-    pub fn without_checksum(mut self) -> ServedFile {
+    pub fn without_checksum(mut self) -> Self {
         self.etag = None;
         self
     }
 
     /// Answer with only the first `bytes` of the body.
-    pub fn truncated_at(mut self, bytes: usize) -> ServedFile {
+    pub fn truncated_at(mut self, bytes: usize) -> Self {
         self.truncate_at = Some(bytes);
         self
     }
 
     /// Do not publish this file at all.
-    pub fn absent(mut self) -> ServedFile {
-        self.absent = true;
+    pub fn absent(mut self) -> Self {
+        self.presence = Presence::Absent;
         self
     }
 
     /// Serve the file itself instead of redirecting to a presigned URL.
-    pub fn served_directly(mut self) -> ServedFile {
-        self.direct = true;
+    pub fn served_directly(mut self) -> Self {
+        self.presence = Presence::Direct;
         self
     }
 
     /// Announce that the file was served from another commit.
-    pub fn served_from(mut self, commit: &str) -> ServedFile {
+    pub fn served_from(mut self, commit: &str) -> Self {
         self.served_commit = Some(commit.to_string());
         self
     }
@@ -235,6 +271,7 @@ pub const ALLOWLIST: [&str; 5] = [
     "tokenizer/tokenizer_config.json",
 ];
 
+/// The git blob object id of `bytes`, as the Model Source publishes it.
 pub fn git_blob_sha1(bytes: &[u8]) -> String {
     let mut sha1 = Sha1::new();
     sha1.update(format!("blob {}\0", bytes.len()).as_bytes());
@@ -242,6 +279,7 @@ pub fn git_blob_sha1(bytes: &[u8]) -> String {
     hex(&sha1.finalize())
 }
 
+/// The sha256 of `bytes`, as the Model Source publishes it.
 pub fn sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
@@ -249,7 +287,7 @@ pub fn sha256(bytes: &[u8]) -> String {
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let mut text = String::new();
+    let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         let _ = write!(text, "{byte:02x}");
     }
@@ -260,16 +298,18 @@ fn hex(bytes: &[u8]) -> String {
 pub struct TempDir(PathBuf);
 
 impl TempDir {
-    pub fn new(case: &str) -> TempDir {
+    /// An empty temporary directory named for `case`, unique to this run.
+    pub fn new(case: &str) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("s1gate-{case}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("a temporary directory");
-        TempDir(path)
+        Self(path)
     }
 
+    /// The directory itself.
     pub fn path(&self) -> &std::path::Path {
         &self.0
     }
@@ -319,22 +359,27 @@ pub fn resolve_path(target: &str) -> Option<(String, String)> {
 }
 
 fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a read timeout");
     let Some(request) = read_request(&mut stream) else {
         return;
     };
     let reply = {
         let mut state = state.lock();
-        state.requests.push(request.clone());
-        route(&state, &request.target)
+        let reply = route(&state, &request.target);
+        state.requests.push(request);
+        reply
     };
     let _ = write_reply(&mut stream, &reply);
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    let mut reader = std::io::BufReader::new(stream);
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        match stream.read(&mut byte) {
+        match reader.read(&mut byte) {
             Ok(0) | Err(_) => return None,
             Ok(_) => head.push(byte[0]),
         }
@@ -357,8 +402,8 @@ struct Reply {
 }
 
 impl Reply {
-    fn new(status: u16) -> Reply {
-        Reply {
+    fn new(status: u16) -> Self {
+        Self {
             status,
             headers: Vec::new(),
             body: Vec::new(),
@@ -366,9 +411,9 @@ impl Reply {
         }
     }
 
-    fn json(status: u16, body: impl Into<String>) -> Reply {
+    fn json(status: u16, body: impl Into<String>) -> Self {
         let body = body.into().into_bytes();
-        let mut reply = Reply::new(status);
+        let mut reply = Self::new(status);
         reply.headers.push((
             "content-type".to_string(),
             "application/json; charset=utf-8".to_string(),
@@ -377,7 +422,7 @@ impl Reply {
         reply
     }
 
-    fn header(mut self, name: &str, value: &str) -> Reply {
+    fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
@@ -407,10 +452,8 @@ fn route(state: &State, target: &str) -> Reply {
                 format!("{{\"error\": \"Repository not found: {repo}\"}}"),
             );
         }
-        let name = revision
-            .clone()
-            .unwrap_or_else(|| state.default_branch.clone());
-        return match state.refs.get(&name) {
+        let name = revision.as_deref().unwrap_or(state.default_branch.as_str());
+        return match state.refs.get(name) {
             Some(commit) => Reply::json(200, format!("{{\"sha\": \"{commit}\"}}")),
             None if revision.is_some() => {
                 Reply::json(404, format!("{{\"error\": \"Invalid rev id: {name}\"}}"))
@@ -422,7 +465,7 @@ fn route(state: &State, target: &str) -> Reply {
     // The presigned transfer of one file.
     if let Some(at) = resolve_at {
         let repo = segments[..at].join("/");
-        let commit = segments[at + 1].clone();
+        let commit = segments[at + 1].as_str();
         let file = segments[at + 2..].join("/");
         if repo != state.repo {
             return Reply::json(
@@ -430,15 +473,25 @@ fn route(state: &State, target: &str) -> Reply {
                 format!("{{\"error\": \"Repository not found: {repo}\"}}"),
             );
         }
-        return match find(state, &commit, &file) {
-            Some(served) if !served.absent => {
-                let mut reply = Reply::new(if served.direct { 200 } else { 307 });
+        return match find(state, commit, &file) {
+            Some(served) => {
+                let status = match served.presence {
+                    Presence::Absent => {
+                        return Reply::json(
+                            404,
+                            format!("{{\"error\": \"Entry not found: {file}\"}}"),
+                        );
+                    }
+                    Presence::Redirect => 307,
+                    Presence::Direct => 200,
+                };
+                let mut reply = Reply::new(status);
                 reply.headers.push((
                     "x-repo-commit".to_string(),
                     served
                         .served_commit
                         .clone()
-                        .unwrap_or_else(|| commit.clone()),
+                        .unwrap_or_else(|| commit.to_string()),
                 ));
                 if let Some(etag) = &served.etag {
                     reply
@@ -450,7 +503,7 @@ fn route(state: &State, target: &str) -> Reply {
                         .headers
                         .push(("x-linked-size".to_string(), served.body.len().to_string()));
                 }
-                if served.direct {
+                if matches!(served.presence, Presence::Direct) {
                     reply.body = served.body.clone();
                     reply.truncate_at = served.truncate_at;
                 } else {
@@ -460,7 +513,7 @@ fn route(state: &State, target: &str) -> Reply {
                 }
                 reply
             }
-            _ => Reply::json(404, format!("{{\"error\": \"Entry not found: {file}\"}}")),
+            None => Reply::json(404, format!("{{\"error\": \"Entry not found: {file}\"}}")),
         };
     }
 
@@ -498,20 +551,25 @@ fn query_value(query: &str, key: &str) -> Option<String> {
 }
 
 fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+
     let reason = match reply.status {
         200 => "OK",
         307 => "Temporary Redirect",
         404 => "Not Found",
         _ => "Unknown",
     };
-    let mut head = format!(
+    let mut head = String::new();
+    write!(
+        head,
         "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
         reply.status,
         reason,
         reply.body.len()
-    );
+    )
+    .expect("a String never fails");
     for (name, value) in &reply.headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
+        write!(head, "{name}: {value}\r\n").expect("a String never fails");
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
@@ -522,6 +580,15 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
     stream.flush()
 }
 
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn decode(segment: &str) -> String {
     let bytes = segment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -529,9 +596,10 @@ fn decode(segment: &str) -> String {
     while index < bytes.len() {
         if bytes[index] == b'%'
             && index + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&segment[index + 1..index + 3], 16)
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
         {
-            decoded.push(byte);
+            decoded.push(high << 4 | low);
             index += 3;
             continue;
         }

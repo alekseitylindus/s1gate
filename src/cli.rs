@@ -1,6 +1,6 @@
 //! The command line: one subcommand per operation. Each subcommand's arguments, behaviour and
-//! output live in its own module under [`crate::commands`]; this module declares them, parses
-//! them, and dispatches.
+//! output live in its own module under `crate::commands`; this module declares them, parses them,
+//! and dispatches.
 
 use clap::{Parser, Subcommand};
 
@@ -33,6 +33,11 @@ enum Command {
 
 /// Parse the command line, run the command, and report what it did. Exit codes are the caller's:
 /// 0 success, 1 runtime error, 2 usage error.
+///
+/// # Errors
+///
+/// Whatever the chosen command fails with, returned for the caller to map to an exit code. A usage
+/// error is not one of them: clap reports that itself and exits 2 before this returns.
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Pull(args) => commands::pull::run(args),
