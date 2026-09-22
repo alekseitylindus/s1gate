@@ -122,7 +122,8 @@ the shape of one:
     "churn_risk": {
       "type": "noul",
       "action": { "act_probability": 0.0123 },
-      "noul": 0.7314
+      "noul": 0.7314,
+      "confidence": 0.7314
     }
   },
   "usage": { "input_tokens": 214, "output_tokens": 0 }

@@ -838,10 +838,10 @@ mod tests {
         );
     }
 
-    /// A batch holding more than one Question Type is still one pass: each Question's Markers
-    /// score as they do alone, so a Type only reaches the Question that declares it.
+    /// A batch holding more than one Question Type scores each Question as it scores alone, so a
+    /// Type only reaches the Question that declares it.
     #[test]
-    fn a_batch_of_mixed_question_types_is_judged_in_one_pass() {
+    fn a_batch_of_mixed_question_types_scores_each_question_as_alone() {
         let config = tiny_config();
         let agent = tiny_agent();
         let weights = tiny_weights();
@@ -861,7 +861,7 @@ mod tests {
             ..
         } = forward(&config, &agent, &weights, &[score()], &special).unwrap();
 
-        assert_eq!(batched.len(), 2, "one pass judges both Questions");
+        assert_eq!(batched.len(), 2, "the batch holds one row per Question");
         for (row, alone) in batched.iter().zip([&choice_alone[0], &score_alone[0]]) {
             for (value, alone) in row.iter().zip(alone) {
                 assert!(

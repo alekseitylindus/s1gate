@@ -714,24 +714,41 @@ fn infer_runs_a_real_laya_checkpoint() {
     let brightness = serde_json::json!({
         "brightness": {"type": "score", "instructions": "How bright is the room?", "criteria": ["dark", "dim", "bright", "blinding"]}
     });
+    let risk = serde_json::json!({
+        "risk": {"type": "noul", "instructions": "Is there a risk of a short circuit?"}
+    });
     let alone_choice = infer(lit.clone());
     let alone_score = infer(brightness.clone());
+    let alone_noul = infer(risk.clone());
     let mut mixed_questions = lit;
-    mixed_questions
-        .as_object_mut()
-        .expect("an object of Questions")
-        .extend(
-            brightness
-                .as_object()
-                .expect("an object of Questions")
-                .clone(),
-        );
+    for questions in [brightness, risk] {
+        mixed_questions
+            .as_object_mut()
+            .expect("an object of Questions")
+            .extend(
+                questions
+                    .as_object()
+                    .expect("an object of Questions")
+                    .clone(),
+            );
+    }
     let mixed = infer(mixed_questions);
 
     assert_eq!(mixed["model"], "laya-rl-agent");
 
+    // Every reported number is rounded half-even at four decimals, so re-rounding one is the
+    // identity: an unrounded float fails here.
+    let snapped = |value: f64| (value * 10_000.0).round() / 10_000.0;
+    let assert_rounded = |value: f64, what: &str| {
+        assert_eq!(
+            value,
+            snapped(value),
+            "{what} ({value}) is not four-decimal"
+        );
+    };
+
     // The distribution an Answer reports: keyed by the names its Question Type reports, each a
-    // probability, together summing to one.
+    // rounded probability, together summing to one.
     let distribution = |answer: &serde_json::Value, keys: &[&str]| {
         let probabilities = answer["probabilities"]
             .as_object()
@@ -741,9 +758,23 @@ fn infer_runs_a_real_laya_checkpoint() {
         let total = probabilities
             .values()
             .map(|value| value.as_f64().expect("a numeric probability"))
-            .inspect(|value| assert!((0.0..=1.0).contains(value)))
+            .inspect(|value| {
+                assert!((0.0..=1.0).contains(value), "probability {value}");
+                assert_rounded(*value, "a probability");
+            })
             .sum::<f64>();
         assert!((total - 1.0).abs() < 0.001, "probabilities sum to {total}");
+    };
+
+    // A reported probability: within the unit interval, and rounded at four decimals.
+    let probability = |value: &serde_json::Value, what: &str| -> f64 {
+        let value = value.as_f64().expect("a numeric reported value");
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "{what} ({value}) is not a probability"
+        );
+        assert_rounded(value, what);
+        value
     };
 
     // A `choice` Answer: the distribution over its Options, and the Action beside it.
@@ -751,6 +782,10 @@ fn infer_runs_a_real_laya_checkpoint() {
     assert_eq!(answer["type"], "choice");
     assert_eq!(answer["choice"], alone_choice["answers"]["lit"]["choice"]);
     distribution(answer, &["no", "yes"]);
+    probability(
+        &answer["action"]["act_probability"],
+        "the choice Answer's action",
+    );
 
     // A `score` Answer: the caller's Levels in the caller's order, the calibrated distribution
     // over them, the probability-weighted index, Confidence, and the Action.
@@ -763,38 +798,37 @@ fn infer_runs_a_real_laya_checkpoint() {
     distribution(answer, &["0", "1", "2", "3"]);
     let weighted = answer["score"].as_f64().expect("a numeric score");
     assert!((0.0..=3.0).contains(&weighted), "score {weighted}");
-    // Every reported number is rounded half-even to four decimal places.
-    for reported in [
-        &answer["score"],
-        &answer["confidence"],
+    assert_rounded(weighted, "the score Answer's index");
+    probability(&answer["confidence"], "the score Answer's confidence");
+    probability(
         &answer["action"]["act_probability"],
-    ] {
-        let number = reported.as_f64().expect("a numeric value");
-        assert_eq!(
-            number,
-            (number * 10_000.0).round() / 10_000.0,
-            "{reported} is not rounded to four decimal places"
-        );
-    }
-    for probability in [&answer["confidence"], &answer["action"]["act_probability"]] {
-        let number = probability.as_f64().expect("a numeric value");
-        assert!(
-            (0.0..=1.0).contains(&number),
-            "{probability} is not a probability"
-        );
-    }
+        "the score Answer's action",
+    );
+
+    // A `noul` Answer: the true side's probability, and the Confidence of the stronger side.
+    let answer = &mixed["answers"]["risk"];
+    assert_eq!(answer["type"], "noul");
+    let noul = answer["noul"].as_f64().expect("a numeric noul");
+    assert!((0.0..=1.0).contains(&noul), "noul {noul}");
+    assert_rounded(noul, "the noul Answer's probability");
+    let confidence = probability(&answer["confidence"], "the noul Answer's confidence");
+    assert!(
+        (confidence - snapped(noul.max(1.0 - noul))).abs() < 1e-12,
+        "a noul Answer's Confidence is the stronger side's probability"
+    );
+    probability(
+        &answer["action"]["act_probability"],
+        "the noul Answer's action",
+    );
 
     // The whole call is one pass: its token total is what its Questions took together.
+    let alone_tokens = [&alone_choice, &alone_score, &alone_noul]
+        .iter()
+        .map(|alone| alone["usage"]["input_tokens"].as_u64().expect("tokens"))
+        .sum::<u64>();
     assert_eq!(
         mixed["usage"]["input_tokens"].as_u64(),
-        Some(
-            alone_choice["usage"]["input_tokens"]
-                .as_u64()
-                .expect("tokens")
-                + alone_score["usage"]["input_tokens"]
-                    .as_u64()
-                    .expect("tokens")
-        ),
+        Some(alone_tokens),
         "usage.input_tokens is the whole call's"
     );
     assert_eq!(mixed["usage"]["output_tokens"], 0);

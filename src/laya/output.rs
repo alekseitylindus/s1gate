@@ -203,6 +203,10 @@ pub(super) fn format_result(
                             message: format!("missing true probability for Question `{id}`"),
                         })?;
                 answer.insert("noul".to_string(), round_even(probability));
+                answer.insert(
+                    "confidence".to_string(),
+                    round_even(probability.max(1.0 - probability)),
+                );
             }
         }
         answers.insert(id.to_string(), Value::Object(answer));
@@ -323,10 +327,78 @@ mod tests {
             serde_json::json!({
                 "model": "laya-rl-agent", "answers": {
                     "choice": {"type": "choice", "choice": "no", "probabilities": {"no": 0.5, "yes": 0.5}, "confidence": 0.0, "action": {"act_probability": 0.25}},
-                    "noul": {"type": "noul", "noul": 0.5, "action": {"act_probability": 0.25}}
+                    "noul": {"type": "noul", "noul": 0.5, "confidence": 0.5, "action": {"act_probability": 0.25}}
                 }, "usage": {"input_tokens": 6, "output_tokens": 0}
             })
         );
+    }
+
+    /// A `noul` Answer reports the Confidence of the stronger side, so a true side weaker than a
+    /// half reports the false side's probability — the oracle's `max(p, 1 - p)`.
+    #[test]
+    fn a_noul_answer_reports_the_stronger_sides_probability() {
+        let call = Call::from_bytes(
+            br#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+        )
+        .unwrap();
+        // `temperature` falls back to 1.1 for `noul`, so a logit of `ln(3) * 1.1` leaves one side
+        // three times the other's odds.
+        let odds = (3.0f32).ln() * FALLBACK[2];
+        for (logits, true_side, confidence) in
+            [(vec![0.0, odds], 0.75, 0.75), (vec![odds, 0.0], 0.25, 0.75)]
+        {
+            let result = format_result(
+                &call,
+                &agent(&[]),
+                &[prepared(QuestionType::Noul, &["false", "true"], 3)],
+                vec![logits],
+                vec![vec![0.5]],
+            )
+            .unwrap();
+
+            assert_eq!(result["answers"]["q"]["noul"], serde_json::json!(true_side));
+            assert_eq!(
+                result["answers"]["q"]["confidence"],
+                serde_json::json!(confidence)
+            );
+        }
+    }
+
+    /// The `6-10` band of `temperature_by_options` is looked up, not skipped, and the bands meet
+    /// where they say they do: a `score` of five Options takes `3-5`, six and ten take `6-10`, and
+    /// eleven takes `11+`. The released Checkpoint fits a `choice:6-10` temperature, so a Question
+    /// of six to ten Options would otherwise take the per-Type fallback in silence.
+    #[test]
+    fn calibration_covers_the_six_to_ten_bucket() {
+        let call = Call::from_bytes(br#"{"state":"x","questions":{
+            "five":{"type":"score","instructions":"x","criteria":["a","b","c","d","e"]},
+            "six":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f"]},
+            "ten":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i","j"]},
+            "eleven":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i","j","k"]}}}"#).unwrap();
+        let five = ["a", "b", "c", "d", "e"];
+        let six = ["a", "b", "c", "d", "e", "f"];
+        let ten = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let eleven = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"];
+        let prepared = vec![
+            prepared(QuestionType::Score, &five, 3),
+            prepared(QuestionType::Score, &six, 3),
+            prepared(QuestionType::Score, &ten, 3),
+            prepared(QuestionType::Score, &eleven, 3),
+        ];
+        let result = format_result(
+            &call,
+            &agent(&[("score:3-5", 0.25), ("score:6-10", 2.0), ("score:11+", 4.0)]),
+            &prepared,
+            vec![leading(5), leading(6), leading(10), leading(11)],
+            vec![vec![0.5]; 4],
+        )
+        .unwrap();
+
+        // Leading probabilities, `1 / (1 + (k - 1) * exp(-2 / T))` at each band's temperature.
+        assert_eq!(reported(&result, "five")[0], 0.9987);
+        assert_eq!(reported(&result, "six")[0], 0.3522);
+        assert_eq!(reported(&result, "ten")[0], 0.232);
+        assert_eq!(reported(&result, "eleven")[0], 0.1415);
     }
 
     /// A `score` Answer reports the Levels the caller gave, in the caller's order, beside the
