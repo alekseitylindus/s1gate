@@ -147,16 +147,9 @@ fn render_options(question: &Question) -> Result<Rendered> {
                     responses: Responses::Labels(labels),
                 })
             }
-            Some(Criteria::List(options)) => {
-                let rendered = options
-                    .iter()
-                    .map(render_criterion)
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Rendered {
-                    options: rendered.clone(),
-                    responses: Responses::Labels(rendered),
-                })
-            }
+            Some(Criteria::List(_)) => Err(Error::Inference {
+                message: "choice Criteria must be an object".to_string(),
+            }),
             None => Ok(Rendered {
                 options: Vec::new(),
                 responses: Responses::Labels(Vec::new()),
@@ -221,12 +214,16 @@ pub(super) fn prepare(
         .iter()
         .map(|(_, question)| {
             let Rendered { options, responses } = render_options(question)?;
+            let instructions = match &question.instructions {
+                Value::String(text) => text.clone(),
+                value => python_json(value, "instructions")?,
+            };
             let mut head = encode(
                 tokenizer,
                 &format!(
                     "{} question: {}",
                     question.kind,
-                    question.instructions.replace(&special.mask_text, " ")
+                    instructions.replace(&special.mask_text, " ")
                 ),
             )?;
             let mut option_ids = Vec::with_capacity(options.len());
@@ -390,14 +387,11 @@ mod tests {
         assert!(rendered.responses.labels().is_empty());
     }
 
-    /// A Criteria description carries the value the caller wrote. Only `null` and the empty string
-    /// mean there is no description, so `false` and `0` are descriptions; a string is left as it
-    /// stands; and anything structured renders as JSON — with Python's own spacing and non-ASCII
-    /// unescaped — rather than as a Python repr, which is what the original implementation put in a
-    /// prompt before it was fixed.
+    /// A `choice` description carries the value the caller wrote. `null` and the empty string mean
+    /// there is no description; strings render as written and structured values render as JSON.
     #[test]
     fn criteria_render_their_descriptions() {
-        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"list":["a",2],"object":{"flag":true,"\u043a\u043b\u044e\u0447":"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435"},"yes":"ok"}},"score":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","list":["a",{"count":2}],"object":{"flag":true,"\u043a\u043b\u044e\u0447":"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435"},"yes":"ok"}},"score":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
         let mut questions = call.questions.iter();
         let (_, choice) = questions.next().unwrap();
         let (_, score) = questions.next().unwrap();
@@ -407,9 +401,7 @@ mod tests {
             [
                 "nil",
                 "empty",
-                "false: false",
-                "zero: 0",
-                "list: [\"a\", 2]",
+                "list: [\"a\", {\"count\": 2}]",
                 "object: {\"flag\": true, \"ключ\": \"значение\"}",
                 "yes: ok"
             ]
@@ -425,9 +417,9 @@ mod tests {
     fn noul_renders_the_false_option_then_the_true_one() {
         let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "described":{"type":"noul","instructions":"x","criteria":{"true":"yes","false":"no"}},
-            "falsy":{"type":"noul","instructions":"x","criteria":{"false":false,"true":0}},
+            "partial":{"type":"noul","instructions":"x","criteria":{"true":"yes"}},
             "structured":{"type":"noul","instructions":"x","criteria":{"false":{"reason":"stays"},"true":["leaves","churns"]}},
-            "blank":{"type":"noul","instructions":"x","criteria":{"false":"","true":null}},
+            "blank":{"type":"noul","instructions":"x","criteria":{"false":"","true":""}},
             "plain":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let options = |id: &str| {
             let (_, question) = call.questions.iter().find(|(name, _)| *name == id).unwrap();
@@ -435,7 +427,10 @@ mod tests {
         };
 
         assert_eq!(options("described"), ["false: no", "true: yes"]);
-        assert_eq!(options("falsy"), ["false: false", "true: 0"]);
+        assert_eq!(
+            options("partial"),
+            ["false: no, the statement does not hold", "true: yes"]
+        );
         assert_eq!(
             options("structured"),
             [

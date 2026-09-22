@@ -72,21 +72,16 @@ fn confidence(probabilities: &[f32]) -> f32 {
 ///
 /// # Errors
 ///
-/// Fails when the output row count does not match the Question batch, when a logits or action row
-/// is missing, when a Question's Options outrun its logits, or when a choice label or `true`
-/// probability is missing.
+/// Fails when the output row count does not match the Question batch, a logits row is missing, a
+/// Question's Options outrun its logits, or a choice label or `true` probability is missing.
 pub(super) fn format_result(
     call: &Call,
     agent: &AgentConfig,
     prepared: &[Prepared],
     logits: Vec<Vec<f32>>,
-    actions: Vec<Vec<f32>>,
 ) -> Result<Value> {
     let question_count = call.questions.iter().count();
-    if prepared.len() != question_count
-        || logits.len() != question_count
-        || actions.len() != question_count
-    {
+    if prepared.len() != question_count || logits.len() != question_count {
         return Err(Error::Inference {
             message: "model output does not match the Question batch".to_string(),
         });
@@ -111,19 +106,8 @@ pub(super) fn format_result(
                 .map(|value| *value / temperature(agent, item.kind, item.options.len()))
                 .collect::<Vec<_>>(),
         );
-        let action = actions
-            .get(row)
-            .and_then(|row| row.first())
-            .copied()
-            .ok_or_else(|| Error::Inference {
-                message: format!("missing action probability for Question `{id}`"),
-            })?;
         let mut answer = Map::new();
         answer.insert("type".to_string(), Value::String(item.kind.to_string()));
-        answer.insert(
-            "action".to_string(),
-            serde_json::json!({ "act_probability": round_even(action) }),
-        );
         match item.kind {
             QuestionType::Choice => {
                 let best = probabilities
@@ -203,10 +187,6 @@ pub(super) fn format_result(
                             message: format!("missing true probability for Question `{id}`"),
                         })?;
                 answer.insert("noul".to_string(), round_even(probability));
-                answer.insert(
-                    "confidence".to_string(),
-                    round_even(probability.max(1.0 - probability)),
-                );
             }
         }
         answers.insert(id.to_string(), Value::Object(answer));
@@ -309,7 +289,7 @@ mod tests {
 
     #[test]
     fn answers_match_the_checkpoint_public_shape() {
-        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":["no","yes"]},"noul":{"type":"noul","instructions":"x"}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"no":null,"yes":null}},"noul":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let prepared = vec![
             prepared(QuestionType::Choice, &["no", "yes"], 3),
             prepared(QuestionType::Noul, &["false", "true"], 3),
@@ -319,26 +299,22 @@ mod tests {
             &agent(&[]),
             &prepared,
             vec![vec![0.0, 0.0], vec![0.0, 0.0]],
-            vec![vec![0.25], vec![0.25]],
         )
         .unwrap();
         assert_eq!(
             result,
             serde_json::json!({
                 "model": "convaiinnovations/laya", "answers": {
-                    "choice": {"type": "choice", "choice": "no", "probabilities": {"no": 0.5, "yes": 0.5}, "confidence": 0.0, "action": {"act_probability": 0.25}},
-                    "noul": {"type": "noul", "noul": 0.5, "confidence": 0.5, "action": {"act_probability": 0.25}}
+                    "choice": {"type": "choice", "choice": "no", "probabilities": {"no": 0.5, "yes": 0.5}, "confidence": 0.0},
+                    "noul": {"type": "noul", "noul": 0.5}
                 }, "usage": {"input_tokens": 6, "output_tokens": 0}
             })
         );
     }
 
-    /// A `noul` Answer reports the true side's probability against the Confidence of the stronger
-    /// side, so a true side weaker than a half reports the false side's probability as its
-    /// confidence — the oracle's `max(p[1], 1 - p[1])`. Both come from the unrounded calibrated
-    /// probabilities: a third on the true side reports `0.3333` and `0.6667`.
+    /// A `noul` Answer reports the true side's probability from the calibrated distribution.
     #[test]
-    fn a_noul_answer_reports_the_stronger_sides_probability() {
+    fn a_noul_answer_reports_the_true_side_probability() {
         let call = Call::from_bytes(
             br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
         )
@@ -346,25 +322,20 @@ mod tests {
         // `temperature` falls back to 1.1 for `noul`, so a logit of `ln(3) * 1.1` leaves one side
         // three times the other's odds.
         let odds = (3.0f32).ln() * FALLBACK[2];
-        for (logits, true_side, confidence) in [
-            (vec![0.0, odds], 0.75, 0.75),
-            (vec![odds, 0.0], 0.25, 0.75),
-            (vec![0.0, (0.5f32).ln() * FALLBACK[2]], 0.3333, 0.6667),
+        for (logits, true_side) in [
+            (vec![0.0, odds], 0.75),
+            (vec![odds, 0.0], 0.25),
+            (vec![0.0, (0.5f32).ln() * FALLBACK[2]], 0.3333),
         ] {
             let result = format_result(
                 &call,
                 &agent(&[]),
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![logits],
-                vec![vec![0.5]],
             )
             .unwrap();
 
             assert_eq!(result["answers"]["q"]["noul"], serde_json::json!(true_side));
-            assert_eq!(
-                result["answers"]["q"]["confidence"],
-                serde_json::json!(confidence)
-            );
         }
     }
 
@@ -384,37 +355,27 @@ mod tests {
                 agent,
                 &[prepared(QuestionType::Noul, &["false", "true"], 3)],
                 vec![vec![0.0, -2.0]],
-                vec![vec![0.5]],
             )
             .unwrap()
         };
 
         let fitted = judge(&agent(&[("noul:2", 2.0)]));
         assert_eq!(fitted["answers"]["q"]["noul"], serde_json::json!(0.2689));
-        assert_eq!(
-            fitted["answers"]["q"]["confidence"],
-            serde_json::json!(0.7311)
-        );
 
         let fallback = judge(&agent(&[]));
         assert_eq!(fallback["answers"]["q"]["noul"], serde_json::json!(0.1397));
-        assert_eq!(
-            fallback["answers"]["q"]["confidence"],
-            serde_json::json!(0.8603)
-        );
     }
 
-    /// The `6-10` band of `temperature_by_options` is looked up, not skipped, and the bands meet
-    /// where they say they do: a `score` of five Options takes `3-5`, six and ten take `6-10`, and
-    /// eleven takes `11+`. The released Checkpoint fits a `choice:6-10` temperature, so a Question
-    /// of six to ten Options would otherwise take the per-Type fallback in silence.
+    /// The `6-10` and `11+` bands of `temperature_by_options` are looked up, not skipped. Choice
+    /// supports more than ten Options, so it exercises the last band without an out-of-contract
+    /// Score.
     #[test]
     fn calibration_covers_the_six_to_ten_bucket() {
         let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "five":{"type":"score","instructions":"x","criteria":["a","b","c","d","e"]},
             "six":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f"]},
             "ten":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i","j"]},
-            "eleven":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i","j","k"]}}}"#).unwrap();
+            "eleven":{"type":"choice","instructions":"x","criteria":{"a":null,"b":null,"c":null,"d":null,"e":null,"f":null,"g":null,"h":null,"i":null,"j":null,"k":null}}}}"#).unwrap();
         let five = ["a", "b", "c", "d", "e"];
         let six = ["a", "b", "c", "d", "e", "f"];
         let ten = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
@@ -423,14 +384,17 @@ mod tests {
             prepared(QuestionType::Score, &five, 3),
             prepared(QuestionType::Score, &six, 3),
             prepared(QuestionType::Score, &ten, 3),
-            prepared(QuestionType::Score, &eleven, 3),
+            prepared(QuestionType::Choice, &eleven, 3),
         ];
         let result = format_result(
             &call,
-            &agent(&[("score:3-5", 0.25), ("score:6-10", 2.0), ("score:11+", 4.0)]),
+            &agent(&[
+                ("score:3-5", 0.25),
+                ("score:6-10", 2.0),
+                ("choice:11+", 4.0),
+            ]),
             &prepared,
             vec![leading(5), leading(6), leading(10), leading(11)],
-            vec![vec![0.5]; 4],
         )
         .unwrap();
 
@@ -441,8 +405,8 @@ mod tests {
         assert_eq!(reported(&result, "eleven")[0], 0.1415);
     }
 
-    /// A `score` Answer reports the Levels the caller gave, in the caller's order, beside the
-    /// calibrated distribution over that order, its Confidence and the Action.
+    /// A `score` Answer reports the Levels the caller gave, in their order, beside the calibrated
+    /// distribution over that order and its Confidence.
     #[test]
     fn a_score_answer_reports_the_callers_levels_in_order() {
         let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"urgency":{"type":"score","instructions":"How urgent?","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
@@ -455,8 +419,6 @@ mod tests {
                 3,
             )],
             vec![vec![0.0; 4]],
-            // A number only half-even rounding at four decimals turns into 0.1235.
-            vec![vec![0.123_456_78]],
         )
         .unwrap();
 
@@ -469,8 +431,7 @@ mod tests {
                         "score": 1.5,
                         "legend": {"0": "immediate", "1": "low", "2": "normal", "3": "high"},
                         "probabilities": {"0": 0.25, "1": 0.25, "2": 0.25, "3": 0.25},
-                        "confidence": 0.0,
-                        "action": {"act_probability": 0.1235}
+                        "confidence": 0.0
                     }
                 }, "usage": {"input_tokens": 3, "output_tokens": 0}
             })
@@ -483,9 +444,9 @@ mod tests {
     fn calibration_follows_the_question_type_and_option_count() {
         let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
             "score2":{"type":"score","instructions":"x","criteria":["a","b"]},
-            "choice2":{"type":"choice","instructions":"x","criteria":["a","b"]},
+            "choice2":{"type":"choice","instructions":"x","criteria":{"a":null,"b":null}},
             "score4":{"type":"score","instructions":"x","criteria":["a","b","c","d"]},
-            "choice4":{"type":"choice","instructions":"x","criteria":["a","b","c","d"]},
+            "choice4":{"type":"choice","instructions":"x","criteria":{"a":null,"b":null,"c":null,"d":null}},
             "score9":{"type":"score","instructions":"x","criteria":["a","b","c","d","e","f","g","h","i"]},
             "noul":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let prepared = vec![
@@ -512,7 +473,6 @@ mod tests {
                 leading(9),
                 leading(2),
             ],
-            vec![vec![0.5]; 6],
         )
         .unwrap();
 
@@ -540,7 +500,6 @@ mod tests {
             &agent(&[("score:2", 0.000_1)]),
             &[prepared(QuestionType::Score, &["low", "high"], 3)],
             vec![vec![0.000_5, 0.0]],
-            vec![vec![0.5]],
         )
         .unwrap();
 
@@ -549,43 +508,38 @@ mod tests {
     }
 
     /// A `score` is the expectation over the unrounded calibrated distribution: rounding the
-    /// probabilities first would move it to 4.5.
+    /// probabilities first would move it to 3.9996.
     #[test]
     fn a_score_is_the_expectation_over_unrounded_probabilities() {
-        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["L1","L2","L3","L4","L5","L6","L7","L8","L9","L10","L11"]}}}"#).unwrap();
-        // Eleven Levels whose last carries 0.00002 of the calibrated mass and whose other ten
-        // carry 0.099998 each, at a calibration temperature of one: the logit that says so is the
-        // `z` with `e^z = 0.00002 * 10 / (1 - 0.00002)`.
-        let mut logits = vec![0.0f32; 11];
-        logits[10] = (2.000_04e-4f32).ln();
-        let names = [
-            "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", "L11",
-        ];
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"score","instructions":"x","criteria":["L1","L2","L3","L4","L5","L6","L7","L8","L9","L10"]}}}"#).unwrap();
+        // Ten Levels whose last carries 0.00002 of the calibrated mass and whose other nine
+        // carry 0.1111089 each, at a calibration temperature of one.
+        let mut logits = vec![0.0f32; 10];
+        logits[9] = (1.800_04e-4f32).ln();
+        let names = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10"];
         let result = format_result(
             &call,
-            &agent(&[("score:11+", 1.0)]),
+            &agent(&[("score:6-10", 1.0)]),
             &[prepared(QuestionType::Score, &names, 3)],
             vec![logits],
-            vec![vec![0.5]],
         )
         .unwrap();
 
-        assert_eq!(result["answers"]["q"]["score"], serde_json::json!(4.5001));
-        assert_eq!(reported(&result, "q")[0], 0.1);
-        assert_eq!(reported(&result, "q")[10], 0.0);
+        assert_eq!(result["answers"]["q"]["score"], serde_json::json!(4.0001));
+        assert_eq!(reported(&result, "q")[0], 0.1111);
+        assert_eq!(reported(&result, "q")[9], 0.0);
     }
 
     /// Reported probabilities are each rounded as they are; they are not renormalized back to a
     /// distribution that sums to one.
     #[test]
     fn rounded_probabilities_are_not_renormalized() {
-        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"choice","instructions":"x","criteria":["a","b","c"]}}}"#).unwrap();
+        let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"choice","instructions":"x","criteria":{"a":null,"b":null,"c":null}}}}"#).unwrap();
         let result = format_result(
             &call,
             &agent(&[]),
             &[prepared(QuestionType::Choice, &["a", "b", "c"], 3)],
             vec![vec![0.0; 3]],
-            vec![vec![0.5]],
         )
         .unwrap();
 
@@ -604,7 +558,7 @@ mod tests {
     #[test]
     fn a_mixed_call_reports_one_whole_call_token_total() {
         let call = Call::from_bytes(br#"{"model":"convaiinnovations/laya","state":"x","questions":{
-            "route":{"type":"choice","instructions":"x","criteria":["billing","shipping","account"]},
+            "route":{"type":"choice","instructions":"x","criteria":{"billing":null,"shipping":null,"account":null}},
             "urgency":{"type":"score","instructions":"x","criteria":["low","high","normal"]},
             "churn_risk":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let result = format_result(
@@ -616,7 +570,6 @@ mod tests {
                 prepared(QuestionType::Noul, &["false", "true"], 3),
             ],
             vec![vec![0.0; 3], vec![0.0; 3], vec![0.0; 2]],
-            vec![vec![0.25], vec![0.75], vec![0.5]],
         )
         .unwrap();
 
@@ -627,15 +580,8 @@ mod tests {
             serde_json::json!({"0": "low", "1": "high", "2": "normal"})
         );
         assert_eq!(
-            result["answers"]["urgency"]["action"]["act_probability"],
-            0.75
-        );
-        assert_eq!(
             result["answers"]["churn_risk"],
-            serde_json::json!({
-                "type": "noul", "noul": 0.5, "confidence": 0.5,
-                "action": {"act_probability": 0.5}
-            }),
+            serde_json::json!({"type": "noul", "noul": 0.5}),
             "a noul Answer reports no distribution and no legend"
         );
         assert_eq!(

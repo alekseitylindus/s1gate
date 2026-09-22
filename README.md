@@ -98,9 +98,9 @@ A call is a State plus the Questions to judge against it:
 
 A Question is one of exactly three types. `choice` picks a labelled Option and reports the
 distribution over them; `score` reports the probability-weighted index over ordered Levels;
-`noul` reports the probability of the true side. Every Answer carries the Action signal beside it,
-under `action.act_probability`. Answers keep the caller's Question ids — the numbers below only show
-the shape of one:
+`noul` reports the probability of the true side. Answers keep the caller's Question ids. `choice`
+accepts 2 to 255 named Options; `score` accepts 2 to 10 Levels. `state` and `instructions` can be
+strings, objects, or arrays. The numbers below only show the shape of one response:
 
 ```json
 {
@@ -108,14 +108,12 @@ the shape of one:
   "answers": {
     "route": {
       "type": "choice",
-      "action": { "act_probability": 0.0123 },
       "choice": "billing",
       "probabilities": { "billing": 0.9988, "account": 0.0012 },
       "confidence": 0.9812
     },
     "urgency": {
       "type": "score",
-      "action": { "act_probability": 0.0123 },
       "score": 2.9142,
       "legend": { "0": "low", "1": "normal", "2": "high", "3": "immediate" },
       "probabilities": { "0": 0.0, "1": 0.0001, "2": 0.0856, "3": 0.9143 },
@@ -123,9 +121,7 @@ the shape of one:
     },
     "churn_risk": {
       "type": "noul",
-      "action": { "act_probability": 0.0123 },
-      "noul": 0.7314,
-      "confidence": 0.7314
+      "noul": 0.7314
     }
   },
   "usage": { "input_tokens": 214, "output_tokens": 0 }
@@ -133,9 +129,9 @@ the shape of one:
 ```
 
 A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
-as JSON. `null` and `""` mean an Option is named without a description, so `0` and `false` describe
-an Option rather than standing in for one. `score` and array-valued `choice` Criteria hold strings,
-so their Levels and Options are rendered as they are.
+as JSON. `choice` Criteria is an object whose values are strings, objects, arrays, or `null`.
+`score` Criteria is an ordered array of string, object, or array descriptions. `noul` Criteria may
+give either or both of `true` and `false` descriptions with those same types.
 
 Numbers are rounded half-to-even at four decimal places, matching the original implementation.
 

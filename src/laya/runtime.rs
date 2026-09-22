@@ -443,14 +443,12 @@ impl Masks {
     }
 }
 
-/// The per-Question rows one forward pass returns: the Marker logits, and the Action weights
-/// beside them, share this shape, one row per Question of the System One Call.
+/// The per-Question rows one forward pass returns, one row per Question of the System One Call.
 pub(super) type Scores = Vec<Vec<f32>>;
 
-/// What one forward pass returns: the Marker logits of every Question, and its Action weights.
+/// What one forward pass returns: the Marker logits of every Question.
 pub(super) struct Forward {
     pub(super) logits: Scores,
-    pub(super) actions: Scores,
 }
 
 /// Judge every Question of one System One Call in a single forward pass.
@@ -568,50 +566,13 @@ pub(super) fn forward(
 
     let states = gather_markers(&hidden, &marker_flat, marker_slots)?;
     let logits = score_markers(&states, &marker_mask, weights)?;
-    let probabilities = ops::softmax_last_dim(&logits)?;
-    let (sorted, _) = probabilities.sort_last_dim(true)?;
-    let width = sorted.dim(1)?;
-    let top = sorted.narrow(1, width.saturating_sub(1), 1)?;
-    let runner_up = sorted.narrow(1, width.saturating_sub(2), 1)?;
-    // The features read the Options a Question actually has, which is what its Markers mark.
-    let options = marker_mask.sum_keepdim(1)?.to_dtype(DType::F32)?;
-    let entropy = probabilities
-        .mul(&probabilities.maximum(1e-9f64)?.log()?)?
-        .sum_keepdim(1)?
-        .neg()?
-        .broadcast_div(&options.maximum(2f64)?.log()?)?;
-    let features = Tensor::cat(
-        &[&top, &top.sub(&runner_up)?, &entropy, &(options / 255f64)?],
-        1,
-    )?;
-    let pooled = hidden.narrow(1, 0, 1)?.squeeze(1)?;
-    let pooled = Tensor::cat(&[&pooled, &features], 1)?;
-    let action = linear(
-        &pooled,
-        weights.get("act_head.0.weight")?,
-        Some(weights.get("act_head.0.bias")?),
-    )?
-    .gelu_erf()?;
-    let action = linear(
-        &action,
-        weights.get("act_head.2.weight")?,
-        Some(weights.get("act_head.2.bias")?),
-    )?;
-    let action = ops::softmax_last_dim(&action)?;
-
     let logits = logits.to_vec2::<f32>()?;
-    let actions = action.to_vec2::<f32>()?;
-    if logits
-        .iter()
-        .flatten()
-        .chain(actions.iter().flatten())
-        .any(|value| !value.is_finite())
-    {
+    if logits.iter().flatten().any(|value| !value.is_finite()) {
         return Err(Error::Inference {
             message: "model produced non-finite output".to_string(),
         });
     }
-    Ok(Forward { logits, actions })
+    Ok(Forward { logits })
 }
 
 #[cfg(test)]

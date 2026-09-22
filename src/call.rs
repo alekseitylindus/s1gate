@@ -44,6 +44,11 @@ impl Call {
     }
 
     fn validate(&self) -> Result<()> {
+        if !is_typesafe_value(&self.state) {
+            return Err(Error::invalid_call(
+                "state must be a string, object, or array",
+            ));
+        }
         if self.questions.is_empty() {
             return Err(Error::invalid_call("at least one Question is required"));
         }
@@ -120,31 +125,62 @@ pub struct Question {
     #[serde(rename = "type")]
     pub kind: QuestionType,
     /// What the Question asks, rendered into its prompt.
-    pub instructions: String,
+    pub instructions: Value,
     /// The answer space the Question defines; a `noul` Question may leave it out.
     pub criteria: Option<Criteria>,
 }
 
 impl Question {
     fn validate(&self, id: &str) -> Result<()> {
+        if !is_typesafe_value(&self.instructions) {
+            return Err(Error::invalid_call(format!(
+                "Question `{id}` instructions must be a string, object, or array"
+            )));
+        }
         match self.kind {
             QuestionType::Choice => match self.criteria.as_ref() {
                 Some(Criteria::Object(options)) => {
+                    if options.len() > 255 {
+                        return Err(Error::invalid_call(format!(
+                            "Question `{id}` choice Criteria may contain at most 255 Options"
+                        )));
+                    }
+                    if options
+                        .iter()
+                        .any(|(_, value)| !value.is_null() && !is_typesafe_value(value))
+                    {
+                        return Err(Error::invalid_call(format!(
+                            "Question `{id}` choice descriptions must be strings, objects, arrays, or null"
+                        )));
+                    }
                     let names: Vec<&str> = options.iter().map(|(name, _)| name.as_str()).collect();
                     validate_names(id, self.kind, "Option", &names)
                 }
-                Some(Criteria::List(values)) => {
-                    let names = strings(id, self.kind, "Option", values)?;
-                    validate_names(id, self.kind, "Option", &names)
-                }
+                Some(Criteria::List(_)) => Err(Error::invalid_call(format!(
+                    "Question `{id}` choice Criteria must be an object of Options"
+                ))),
                 None => Err(Error::invalid_call(format!(
                     "Question `{id}` choice requires Criteria with at least two Options"
                 ))),
             },
             QuestionType::Score => match self.criteria.as_ref() {
                 Some(Criteria::List(values)) => {
-                    let names = strings(id, self.kind, "Level", values)?;
-                    validate_names(id, self.kind, "Level", &names)
+                    if values.len() < 2 {
+                        return Err(Error::invalid_call(format!(
+                            "Question `{id}` score Criteria must contain at least two Levels"
+                        )));
+                    }
+                    if values.len() > 10 {
+                        return Err(Error::invalid_call(format!(
+                            "Question `{id}` score Criteria may contain at most 10 Levels"
+                        )));
+                    }
+                    if values.iter().any(|value| !is_typesafe_value(value)) {
+                        return Err(Error::invalid_call(format!(
+                            "Question `{id}` score descriptions must be strings, objects, or arrays"
+                        )));
+                    }
+                    Ok(())
                 }
                 Some(Criteria::Object(_)) => Err(Error::invalid_call(format!(
                     "Question `{id}` score Criteria must be an array of Levels"
@@ -156,15 +192,25 @@ impl Question {
             QuestionType::Noul => match self.criteria.as_ref() {
                 None => Ok(()),
                 Some(Criteria::Object(options)) => {
-                    let names: BTreeSet<&str> =
-                        options.iter().map(|(name, _)| name.as_str()).collect();
-                    if options.len() == 2 && names == BTreeSet::from(["false", "true"]) {
-                        Ok(())
-                    } else {
-                        Err(Error::invalid_call(format!(
-                            "Question `{id}` noul Criteria must contain the false and true Options"
-                        )))
+                    let mut names = BTreeSet::new();
+                    for (name, value) in options {
+                        if !matches!(name.as_str(), "false" | "true") {
+                            return Err(Error::invalid_call(format!(
+                                "Question `{id}` noul Criteria may contain only `false` and `true`"
+                            )));
+                        }
+                        if !is_typesafe_value(value) {
+                            return Err(Error::invalid_call(format!(
+                                "Question `{id}` noul descriptions must be strings, objects, or arrays"
+                            )));
+                        }
+                        if !names.insert(name.as_str()) {
+                            return Err(Error::invalid_call(format!(
+                                "Question `{id}` noul Criteria must not repeat `{name}`"
+                            )));
+                        }
                     }
+                    Ok(())
                 }
                 Some(Criteria::List(_)) => Err(Error::invalid_call(format!(
                     "Question `{id}` noul Criteria must be an object with false and true Options"
@@ -172,6 +218,11 @@ impl Question {
             },
         }
     }
+}
+
+/// TypeSafe's structured input values are strings, objects, and arrays.
+fn is_typesafe_value(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Object(_) | Value::Array(_))
 }
 
 /// The only Question Types supported by the first Backend.
@@ -285,25 +336,6 @@ fn validate_names(id: &str, kind: QuestionType, noun: &str, names: &[&str]) -> R
         }
     }
     Ok(())
-}
-
-/// The strings a Criteria array holds, or the error naming the Question whose array it is not.
-fn strings<'a>(
-    id: &str,
-    kind: QuestionType,
-    noun: &str,
-    values: &'a [Value],
-) -> Result<Vec<&'a str>> {
-    values
-        .iter()
-        .map(|value| {
-            value.as_str().ok_or_else(|| {
-                Error::invalid_call(format!(
-                    "Question `{id}` {kind} Criteria array must contain string {noun}s"
-                ))
-            })
-        })
-        .collect()
 }
 
 /// A caller-chosen name as a diagnostic shows it: quoted, with non-printable characters escaped, so

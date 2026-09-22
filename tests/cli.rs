@@ -373,7 +373,7 @@ fn infer_rejects_duplicate_choice_options() {
                 "route": {
                     "type": "choice",
                     "instructions": "Where should this go?",
-                    "criteria": ["billing", "billing"]
+                    "criteria": {"billing": "payments", "billing": "billing"}
                 }
             }
         }"#,
@@ -423,7 +423,7 @@ fn infer_rejects_a_score_with_choice_criteria() {
 }
 
 #[test]
-fn infer_rejects_a_noul_with_only_one_option() {
+fn infer_accepts_one_optional_noul_clarification() {
     let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
@@ -437,9 +437,13 @@ fn infer_rejects_a_noul_with_only_one_option() {
         }"#,
     );
 
-    assert_eq!(run.code, 2);
+    assert_eq!(run.code, 1);
     assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("false and true"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("Checkpoint `convaiinnovations/laya`"),
+        "{}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -467,7 +471,7 @@ fn infer_rejects_duplicate_question_ids() {
         r#"{
             "state": "x",
             "questions": {
-                "route": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]},
+                "route": {"type": "choice", "instructions": "x", "criteria": {"a": null, "b": null}},
                 "route": {"type": "choice", "instructions": "y", "criteria": ["c", "d"]}
             }
         }"#,
@@ -504,7 +508,7 @@ fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
         r#"{
             "state": {"body": "x"},
             "questions": {
-                "route": {"type": "choice", "instructions": "Where?", "criteria": ["a", "b"]},
+                "route": {"type": "choice", "instructions": "Where?", "criteria": {"a": null, "b": null}},
                 "urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["low", "high"]},
                 "risk": {"type": "noul", "instructions": "Is it risky?"}
             }
@@ -534,6 +538,102 @@ fn infer_selects_the_stored_checkpoint_by_the_calls_model() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("a response");
     assert_eq!(response["model"], "convaiinnovations/laya");
+}
+
+#[test]
+fn infer_accepts_typesafe_structured_inputs_for_each_question_type() {
+    let data_home = TempDir::new("cli-infer-structured");
+    fixture::write_inferable(&checkpoint_root(&data_home));
+    let request = r#"{
+        "model":"convaiinnovations/laya",
+        "state":{"message":"x","metadata":[1,true]},
+        "questions":{
+            "route":{"type":"choice","instructions":{"question":"Where?","context":["x"]},"criteria":{"billing":{"description":"payments"},"other":null}},
+            "urgency":{"type":"score","instructions":["How urgent?",{"context":"x"}],"criteria":["low",{"level":"high"}]},
+            "risk":{"type":"noul","instructions":{"question":"Risk?"},"criteria":{"true":{"reason":"yes"}}}
+        }
+    }"#;
+    let run = run_in_with_input(&data_home, &["infer"], request);
+
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("a response");
+    assert_eq!(response["model"], "convaiinnovations/laya");
+    let answers = response["answers"].as_object().expect("answers");
+    assert_eq!(
+        answers.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["route", "urgency", "risk"]
+    );
+    assert_eq!(answers["route"]["type"], "choice");
+    assert_eq!(answers["urgency"]["type"], "score");
+    assert_eq!(answers["risk"]["type"], "noul");
+    assert_eq!(answers["route"].as_object().unwrap().len(), 4);
+    assert_eq!(answers["urgency"]["legend"]["0"], "low");
+    assert_eq!(answers["urgency"]["legend"]["1"], "{\"level\": \"high\"}");
+    assert_eq!(answers["risk"].as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn infer_rejects_state_and_instructions_outside_typesafe_json_shapes() {
+    for request in [
+        r#"{"model":"convaiinnovations/laya","state":null,"questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+        r#"{"model":"convaiinnovations/laya","state":"x","questions":{"q":{"type":"noul","instructions":true}}}"#,
+    ] {
+        let run = run_infer_with_laya_model_identifier(request);
+
+        assert_eq!(run.code, 2);
+        assert!(run.stdout.is_empty());
+        assert!(
+            run.stderr.contains("string, object, or array"),
+            "{}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn infer_enforces_typesafe_criteria_forms_and_limits() {
+    let mut too_many_options = serde_json::Map::new();
+    for index in 0..256 {
+        too_many_options.insert(format!("option-{index}"), serde_json::Value::Null);
+    }
+    let too_many_levels = serde_json::Value::Array(
+        (0..11)
+            .map(|index| serde_json::Value::String(format!("level-{index}")))
+            .collect(),
+    );
+    let cases = [
+        (
+            "choice requires a map",
+            serde_json::json!({"type":"choice","instructions":"x","criteria":["a","b"]}),
+        ),
+        (
+            "choice option limit",
+            serde_json::json!({"type":"choice","instructions":"x","criteria":too_many_options}),
+        ),
+        (
+            "score minimum levels",
+            serde_json::json!({"type":"score","instructions":"x","criteria":["only one"]}),
+        ),
+        (
+            "score level limit",
+            serde_json::json!({"type":"score","instructions":"x","criteria":too_many_levels}),
+        ),
+        (
+            "noul description type",
+            serde_json::json!({"type":"noul","instructions":"x","criteria":{"true":null}}),
+        ),
+    ];
+    for (case, question) in cases {
+        let request = serde_json::json!({
+            "model":"convaiinnovations/laya",
+            "state":"x",
+            "questions":{"q":question},
+        });
+        let run = run_infer_with_laya_model_identifier(request.to_string());
+
+        assert_eq!(run.code, 2, "{case}: {}", run.stderr);
+        assert!(run.stdout.is_empty(), "{case}");
+    }
 }
 
 #[test]
@@ -577,11 +677,11 @@ fn infer_rejects_a_score_level_that_is_not_a_string() {
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
     assert!(run.stderr.contains("urgency"), "{}", run.stderr);
-    assert!(run.stderr.contains("string Levels"), "{}", run.stderr);
+    assert!(run.stderr.contains("score descriptions"), "{}", run.stderr);
 }
 
 #[test]
-fn infer_rejects_duplicate_score_levels() {
+fn infer_accepts_duplicate_score_descriptions_as_separate_levels() {
     let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
@@ -595,10 +695,13 @@ fn infer_rejects_duplicate_score_levels() {
         }"#,
     );
 
-    assert_eq!(run.code, 2);
+    assert_eq!(run.code, 1);
     assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("urgency"), "{}", run.stderr);
-    assert!(run.stderr.contains("distinct Levels"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("Checkpoint `convaiinnovations/laya`"),
+        "{}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -610,7 +713,7 @@ fn infer_names_the_question_whose_option_name_is_unusable() {
                 "route": {
                     "type": "choice",
                     "instructions": "Where should this go?",
-                    "criteria": ["billing", ""]
+                    "criteria": {"billing": "payments", "": "other"}
                 }
             }
         }"#,
@@ -776,18 +879,14 @@ fn infer_runs_a_real_laya_checkpoint() {
         value
     };
 
-    // A `choice` Answer: the distribution over its Options, and the Action beside it.
+    // A `choice` Answer: the distribution over its Options.
     let answer = &mixed["answers"]["lit"];
     assert_eq!(answer["type"], "choice");
     assert_eq!(answer["choice"], alone_choice["answers"]["lit"]["choice"]);
     distribution(answer, &["no", "yes"]);
-    probability(
-        &answer["action"]["act_probability"],
-        "the choice Answer's action",
-    );
 
     // A `score` Answer: the caller's Levels in the caller's order, the calibrated distribution
-    // over them, the probability-weighted index, Confidence, and the Action.
+    // over them, the probability-weighted index and Confidence.
     let answer = &mixed["answers"]["brightness"];
     assert_eq!(answer["type"], "score");
     assert_eq!(
@@ -799,10 +898,6 @@ fn infer_runs_a_real_laya_checkpoint() {
     assert!((0.0..=3.0).contains(&weighted), "score {weighted}");
     assert_rounded(weighted, "the score Answer's index");
     probability(&answer["confidence"], "the score Answer's confidence");
-    probability(
-        &answer["action"]["act_probability"],
-        "the score Answer's action",
-    );
 
     // A `noul` Answer: the true side's probability, and the Confidence of the stronger side.
     let answer = &mixed["answers"]["risk"];
@@ -810,15 +905,6 @@ fn infer_runs_a_real_laya_checkpoint() {
     let noul = answer["noul"].as_f64().expect("a numeric noul");
     assert!((0.0..=1.0).contains(&noul), "noul {noul}");
     assert_rounded(noul, "the noul Answer's probability");
-    let confidence = probability(&answer["confidence"], "the noul Answer's confidence");
-    assert!(
-        (confidence - snapped(noul.max(1.0 - noul))).abs() < 1e-12,
-        "a noul Answer's Confidence is the stronger side's probability"
-    );
-    probability(
-        &answer["action"]["act_probability"],
-        "the noul Answer's action",
-    );
 
     // The whole call is one pass: its token total is what its Questions took together.
     let alone_tokens = [&alone_choice, &alone_score, &alone_noul]
