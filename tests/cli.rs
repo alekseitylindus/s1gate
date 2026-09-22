@@ -558,6 +558,10 @@ fn infer_accepts_typesafe_structured_inputs_for_each_question_type() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("a response");
     assert_eq!(response["model"], "convaiinnovations/laya");
+    assert_eq!(
+        json_keys(&response),
+        ["model", "answers", "usage"].into_iter().collect()
+    );
     let answers = response["answers"].as_object().expect("answers");
     assert_eq!(
         answers.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -566,10 +570,28 @@ fn infer_accepts_typesafe_structured_inputs_for_each_question_type() {
     assert_eq!(answers["route"]["type"], "choice");
     assert_eq!(answers["urgency"]["type"], "score");
     assert_eq!(answers["risk"]["type"], "noul");
-    assert_eq!(answers["route"].as_object().unwrap().len(), 4);
+    assert_eq!(
+        json_keys(&answers["route"]),
+        ["type", "choice", "probabilities", "confidence"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        json_keys(&answers["urgency"]),
+        ["type", "score", "legend", "probabilities", "confidence"]
+            .into_iter()
+            .collect()
+    );
     assert_eq!(answers["urgency"]["legend"]["0"], "low");
     assert_eq!(answers["urgency"]["legend"]["1"], "{\"level\": \"high\"}");
-    assert_eq!(answers["risk"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        json_keys(&answers["risk"]),
+        ["type", "noul"].into_iter().collect()
+    );
+    assert_eq!(
+        json_keys(&response["usage"]),
+        ["input_tokens", "output_tokens"].into_iter().collect()
+    );
 }
 
 #[test]
@@ -923,6 +945,15 @@ struct Run {
     code: i32,
     stdout: String,
     stderr: String,
+}
+
+fn json_keys(value: &serde_json::Value) -> std::collections::BTreeSet<&str> {
+    value
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect()
 }
 
 fn run(args: &[&str]) -> Run {
