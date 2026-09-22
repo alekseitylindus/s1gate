@@ -48,8 +48,13 @@ fn run_with_settings(
 ) -> Result<()> {
     let (call, body) = read_call(&mut input)?;
     let result = if call.model == "jev-latest" {
-        let api_key = typesafe_api_key(env_api_key, xdg_config_home.as_deref(), home.as_deref())?;
-        crate::typesafe::run_at(&call, &body, Some(&api_key), endpoint)?
+        let settings = typesafe_settings(
+            env_api_key,
+            xdg_config_home.as_deref(),
+            home.as_deref(),
+            endpoint,
+        )?;
+        crate::typesafe::run_at(&call, &body, Some(&settings.api_key), &settings.endpoint)?
     } else {
         let source = model_source::lookup_identifier(&call.model)?;
         let name = source.repo;
@@ -70,61 +75,109 @@ fn run_with_settings(
     Ok(())
 }
 
-fn typesafe_api_key(
+struct TypeSafeSettings {
+    api_key: String,
+    endpoint: String,
+}
+
+fn typesafe_settings(
     env_api_key: Option<OsString>,
     xdg_config_home: Option<&Path>,
     home: Option<&Path>,
-) -> Result<String> {
-    if let Some(key) = env_api_key {
-        let key = key.to_str().ok_or_else(|| Error::TypeSafe {
-            status: None,
-            message: "TYPESAFE_API_KEY is not valid Unicode".to_string(),
-        })?;
-        if key.trim().is_empty() {
-            return Err(Error::TypeSafe {
+    default_endpoint: &str,
+) -> Result<TypeSafeSettings> {
+    let env_api_key = env_api_key
+        .map(|key| {
+            let key = key.to_str().ok_or_else(|| Error::TypeSafe {
                 status: None,
-                message: "TYPESAFE_API_KEY is empty; set it to a non-empty key".to_string(),
-            });
-        }
-        return Ok(key.to_string());
-    }
+                message: "TYPESAFE_API_KEY is not valid Unicode".to_string(),
+            })?;
+            if key.trim().is_empty() {
+                return Err(Error::TypeSafe {
+                    status: None,
+                    message: "TYPESAFE_API_KEY is empty; set it to a non-empty key".to_string(),
+                });
+            }
+            Ok(key.to_string())
+        })
+        .transpose()?;
 
-    let config_home = xdg_config_home
+    let config_path = xdg_config_home
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .or_else(|| home.map(|path| path.join(".config")))
-        .ok_or_else(|| Error::TypeSafe {
-            status: None,
-            message: "cannot locate configuration; set TYPESAFE_API_KEY or HOME".to_string(),
-        })?;
-    let path = config_home.join("s1gate/config.toml");
-    let contents = std::fs::read_to_string(&path).map_err(|error| Error::TypeSafe {
+        .map(|config_home| config_home.join("s1gate/config.toml"));
+    let config = if let Some(path) = config_path {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
+                Ok(config) => Some((path, config)),
+                Err(_) if env_api_key.is_some() => None,
+                Err(_) => {
+                    return Err(Error::TypeSafe {
+                        status: None,
+                        message: format!(
+                            "{} is not valid TOML; fix it or set TYPESAFE_API_KEY",
+                            path.display()
+                        ),
+                    });
+                }
+            },
+            Err(_) if env_api_key.is_some() => None,
+            Err(error) => {
+                return Err(Error::TypeSafe {
+                    status: None,
+                    message: format!(
+                        "cannot read {} ({error}); set TYPESAFE_API_KEY or add typesafe.api_key to this file",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    let configured_api_key = config.as_ref().and_then(|(_, config)| {
+        config
+            .get("typesafe")
+            .and_then(|typesafe| typesafe.get("api_key"))
+            .and_then(toml::Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .map(str::to_string)
+    });
+    let api_key = env_api_key.or(configured_api_key).ok_or_else(|| Error::TypeSafe {
         status: None,
-        message: format!(
-            "cannot read {} ({error}); set TYPESAFE_API_KEY or add typesafe.api_key to this file",
-            path.display()
-        ),
-    })?;
-    let config: toml::Value = toml::from_str(&contents).map_err(|_| Error::TypeSafe {
-        status: None,
-        message: format!(
-            "{} is not valid TOML; fix it or set TYPESAFE_API_KEY",
-            path.display()
-        ),
-    })?;
-    let api_key = config
-        .get("typesafe")
-        .and_then(|typesafe| typesafe.get("api_key"))
-        .and_then(toml::Value::as_str)
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| Error::TypeSafe {
-            status: None,
-            message: format!(
+        message: config.as_ref().map_or_else(
+            || "cannot locate configuration; set TYPESAFE_API_KEY or HOME".to_string(),
+            |(path, _)| format!(
                 "{} must contain a non-empty string at typesafe.api_key; set TYPESAFE_API_KEY or fix the file",
                 path.display()
             ),
-        })?;
-    Ok(api_key.to_string())
+        ),
+    })?;
+
+    let endpoint = if let Some((path, config)) = &config {
+        match config
+            .get("typesafe")
+            .and_then(|typesafe| typesafe.get("endpoint"))
+        {
+            None => default_endpoint.to_string(),
+            Some(toml::Value::String(endpoint)) if !endpoint.trim().is_empty() => endpoint.clone(),
+            Some(_) => {
+                return Err(Error::TypeSafe {
+                    status: None,
+                    message: format!(
+                        "{} must contain a non-empty string at typesafe.endpoint",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    } else {
+        default_endpoint.to_string()
+    };
+
+    Ok(TypeSafeSettings { api_key, endpoint })
 }
 
 /// Read the System One Call from stdin, the only place `infer` takes input: a reader that fails is

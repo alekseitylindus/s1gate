@@ -139,11 +139,13 @@ when `XDG_CONFIG_HOME` is unset or empty:
 ```toml
 [typesafe]
 api_key = "your-api-key"
+# Optional. Defaults to TypeSafe's production endpoint.
+endpoint = "https://api.typesafe.ai/v1/systemone"
 ```
 
 Restrict this file to your user, for example with `chmod 600 ~/.config/s1gate/config.toml`. A set
 `TYPESAFE_API_KEY` takes precedence for that process. An empty environment value is an error and
-does not fall back to the file.
+does not fall back to the file. `typesafe.endpoint` overrides the default Jev endpoint.
 
 A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
 as JSON. `choice` Criteria is an object whose values are strings, objects, arrays, or `null`.
