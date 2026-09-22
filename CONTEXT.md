@@ -44,9 +44,14 @@ The implementation that judges questions against a Checkpoint. Laya is the only 
 milestone; Jev is a planned one.
 _Avoid_: engine, runtime, driver, model type
 
+**Model Identifier**:
+The caller-chosen value of `model` in a System One Call, naming the model that judges its
+Questions. The current identifier names Laya's Model Source; a future identifier may name a proxy.
+_Avoid_: Model Source when the identifier does not name a local source
+
 **System One Call**:
-One invocation of a Backend: a State plus the Questions to judge against it. Every Question in a call
-is judged in a single forward pass.
+One evaluation of Questions against a State using a Model Identifier. A local Backend judges every
+Question in a call in a single forward pass.
 _Avoid_: request, predict, batch, run
 
 **State**:
@@ -89,12 +94,12 @@ and option count. Fitted outside s1gate; never learned at judgement time.
 _Avoid_: temperature (unqualified — a Checkpoint carries an unused parameter of that name)
 
 **Confidence**:
-The reported certainty of an Answer: normalized entropy for `choice` and `score`, the probability of
-the stronger side for `noul`.
+The reported certainty of a `choice` or `score` Answer, derived from its probability distribution.
+A `noul` Answer reports only the probability of true.
 _Avoid_: score, certainty, margin
 
 **Action**:
-The escalate/act signal every Answer carries, produced independently of the Question Type.
+The escalate/act signal produced independently of the Question Type.
 _Avoid_: escalation, cost
 
 **Parity**:
