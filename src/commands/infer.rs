@@ -495,28 +495,68 @@ mod tests {
         server.join().expect("the server thread");
         assert_eq!(error.exit_code(), 2);
         assert!(error.to_string().contains("HTTP 422"));
+        assert!(error.to_string().contains("bad call"));
         assert!(stdout.is_empty());
     }
 
     #[test]
-    fn incomplete_remote_responses_are_runtime_errors_without_success_json() {
+    fn api_error_messages_are_short_and_redact_the_key_and_call() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
         let endpoint = format!(
             "http://{}/v1/systemone",
             listener.local_addr().expect("address")
         );
+        let call = valid_jev_call();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("the infer request");
             read_http_request(&mut stream);
-            write_response(
-                &mut stream,
-                "200 OK",
-                r#"{"model":"jev-1.13.0","answers":{"risk":{"type":"noul","noul":0.9}}}"#,
-            );
+            let pretty_call = serde_json::to_string_pretty(
+                &serde_json::from_str::<Value>(call).expect("valid call JSON"),
+            )
+            .expect("formatted call JSON");
+            let response = serde_json::json!({
+                "message": format!("rejected test-key {pretty_call}")
+            })
+            .to_string();
+            write_response(&mut stream, "422 Unprocessable Entity", &response);
         });
         let mut stdout = Vec::new();
 
-        let error = run_with_endpoint(
+        let error = run_with_endpoint(Cursor::new(call), &mut stdout, &endpoint, Some("test-key"))
+            .expect_err("TypeSafe rejected the call");
+
+        server.join().expect("the server thread");
+        let diagnostic = error.to_string();
+        assert_eq!(error.exit_code(), 2);
+        assert!(!diagnostic.contains("test-key"));
+        assert!(!diagnostic.contains("jev-latest"));
+        assert!(diagnostic.contains("TypeSafe rejected the System One Call"));
+        assert!(diagnostic.len() < 230, "{diagnostic}");
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn incomplete_remote_responses_are_runtime_errors_without_success_json() {
+        for (response, diagnostic) in [
+            (
+                r#"{"model":"jev-1.13.0","answers":{"risk":{"type":"noul","noul":0.9}}}"#,
+                "incomplete response",
+            ),
+            ("not JSON", "invalid JSON"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
+            let endpoint = format!(
+                "http://{}/v1/systemone",
+                listener.local_addr().expect("address")
+            );
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("the infer request");
+                read_http_request(&mut stream);
+                write_response(&mut stream, "200 OK", response);
+            });
+            let mut stdout = Vec::new();
+
+            let error = run_with_endpoint(
             Cursor::new(r#"{"model":"jev-latest","state":"x","questions":{"risk":{"type":"noul","instructions":"risky?"}}}"#),
             &mut stdout,
             &endpoint,
@@ -524,44 +564,140 @@ mod tests {
         )
         .expect_err("usage is required in the response");
 
-        server.join().expect("the server thread");
-        assert_eq!(error.exit_code(), 1);
-        assert!(error.to_string().contains("incomplete response"));
-        assert!(stdout.is_empty());
+            server.join().expect("the server thread");
+            assert_eq!(error.exit_code(), 1);
+            assert!(error.to_string().contains(diagnostic));
+            assert!(stdout.is_empty());
+        }
     }
 
     #[test]
     fn rate_limits_are_retried_with_a_finite_attempt_count() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
-        let endpoint = format!(
-            "http://{}/v1/systemone",
-            listener.local_addr().expect("address")
-        );
+        for (status, expected) in [
+            ("429 Too Many Requests", "HTTP 429"),
+            ("529 Service Overloaded", "HTTP 529"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
+            let endpoint = format!(
+                "http://{}/v1/systemone",
+                listener.local_addr().expect("address")
+            );
+            let server = thread::spawn(move || {
+                for _ in 0..3 {
+                    let (mut stream, _) = listener.accept().expect("a retry");
+                    read_http_request(&mut stream);
+                    write_response(&mut stream, status, "{\"message\":\"please retry\"}");
+                }
+            });
+            let mut stdout = Vec::new();
+
+            let error = run_with_endpoint(
+                Cursor::new(valid_jev_call()),
+                &mut stdout,
+                &endpoint,
+                Some("test-key"),
+            )
+            .expect_err("the overload remains after retries");
+
+            server.join().expect("the server thread");
+            assert_eq!(error.exit_code(), 1);
+            assert!(error.to_string().contains(expected));
+            assert!(stdout.is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_is_honored_before_the_next_attempt() {
+        let (endpoint, listener) = local_endpoint();
         let server = thread::spawn(move || {
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().expect("a retry");
-                read_http_request(&mut stream);
-                write_response(
-                    &mut stream,
-                    "429 Too Many Requests",
-                    "{\"message\":\"please retry\"}",
-                );
-            }
+            let (mut first, _) = listener.accept().expect("the first request");
+            read_http_request(&mut first);
+            write_response_with_retry_after(&mut first, "429 Too Many Requests", "{}", Some("1"));
+            let (mut second, _) = listener.accept().expect("the retry");
+            read_http_request(&mut second);
+            write_response(
+                &mut second,
+                "200 OK",
+                r#"{"model":"jev-1.13.0","answers":{"risk":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":1}}"#,
+            );
         });
+        let started = std::time::Instant::now();
         let mut stdout = Vec::new();
 
-        let error = run_with_endpoint(
-            Cursor::new(r#"{"model":"jev-latest","state":"x","questions":{"risk":{"type":"noul","instructions":"risky?"}}}"#),
+        run_with_endpoint(
+            Cursor::new(valid_jev_call()),
             &mut stdout,
             &endpoint,
             Some("test-key"),
         )
-        .expect_err("the rate limit remains after retries");
+        .expect("the retry succeeds");
 
         server.join().expect("the server thread");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(950));
+        assert!(serde_json::from_slice::<Value>(&stdout).is_ok());
+    }
+
+    #[test]
+    fn transport_failures_are_runtime_errors_without_success_json() {
+        let (endpoint, listener) = local_endpoint();
+        drop(listener);
+        let mut stdout = Vec::new();
+
+        let error = run_with_endpoint(
+            Cursor::new(valid_jev_call()),
+            &mut stdout,
+            &endpoint,
+            Some("test-key"),
+        )
+        .expect_err("the endpoint is unavailable");
+
         assert_eq!(error.exit_code(), 1);
-        assert!(error.to_string().contains("HTTP 429"));
+        assert!(
+            error
+                .to_string()
+                .contains("could not reach the TypeSafe API")
+        );
         assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn non_retryable_http_failures_make_one_request_and_keep_diagnostics_safe() {
+        for (status, expected) in [
+            ("401 Unauthorized", "HTTP 401"),
+            ("500 Internal Server Error", "HTTP 500"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("a local endpoint");
+            let endpoint = format!(
+                "http://{}/v1/systemone",
+                listener.local_addr().expect("address")
+            );
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("one request");
+                read_http_request(&mut stream);
+                write_response(
+                    &mut stream,
+                    status,
+                    "{\"message\":\"temporary issue test-key\",\"state\":\"private\"}",
+                );
+            });
+            let mut stdout = Vec::new();
+
+            let error = run_with_endpoint(
+                Cursor::new(valid_jev_call()),
+                &mut stdout,
+                &endpoint,
+                Some("test-key"),
+            )
+            .expect_err("the HTTP failure is returned");
+
+            server.join().expect("the server thread");
+            assert_eq!(error.exit_code(), 1);
+            assert!(error.to_string().contains(expected));
+            assert!(!error.to_string().contains("test-key"));
+            assert!(!error.to_string().contains("private"));
+            assert!(error.to_string().contains("[redacted]"));
+            assert!(stdout.is_empty());
+        }
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
@@ -594,11 +730,22 @@ mod tests {
     }
 
     fn write_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+        write_response_with_retry_after(stream, status, body, Some("0"));
+    }
+
+    fn write_response_with_retry_after(
+        stream: &mut std::net::TcpStream,
+        status: &str,
+        body: &str,
+        retry_after: Option<&str>,
+    ) {
         use std::io::Write;
 
+        let retry_header =
+            retry_after.map_or(String::new(), |value| format!("Retry-After: {value}\r\n"));
         write!(
             stream,
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: 0\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{retry_header}\r\n{body}",
             body.len()
         )
         .expect("send the TypeSafe response");

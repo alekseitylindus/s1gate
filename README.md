@@ -147,6 +147,13 @@ Restrict this file to your user, for example with `chmod 600 ~/.config/s1gate/co
 `TYPESAFE_API_KEY` takes precedence for that process. An empty environment value is an error and
 does not fall back to the file. `typesafe.endpoint` overrides the default Jev endpoint.
 
+Jev HTTP 422 responses exit with code 2 because TypeSafe rejected the System One Call. Authentication,
+other HTTP, network, and malformed-response failures exit with code 1. Error output includes the HTTP
+status and a short API message when available; it omits the API key and request body. HTTP 429 and 529
+responses are retried up to two times. Each retry honors a `Retry-After` delay in seconds or HTTP date,
+or waits 200 ms and then 400 ms when the header is absent or invalid. After the final attempt, `infer`
+reports the last failure and writes no success JSON.
+
 A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
 as JSON. `choice` Criteria is an object whose values are strings, objects, arrays, or `null`.
 `score` Criteria is an ordered array of string, object, or array descriptions. `noul` Criteria may

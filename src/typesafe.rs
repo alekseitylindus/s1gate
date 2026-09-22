@@ -2,7 +2,7 @@
 
 use std::io::Read;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
 use ureq::Agent;
@@ -56,11 +56,8 @@ pub(crate) fn run_at(
                 .headers()
                 .get("retry-after")
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let delay = retry_after
-                .unwrap_or_else(|| Duration::from_millis(200 * (1 << attempt)))
-                .min(Duration::from_secs(2));
+                .and_then(|value| retry_after_delay(value, SystemTime::now()));
+            let delay = retry_after.unwrap_or_else(|| Duration::from_millis(200 * (1 << attempt)));
             thread::sleep(delay);
             continue;
         }
@@ -74,7 +71,7 @@ pub(crate) fn run_at(
                 message: "could not read the TypeSafe response".to_string(),
             })?;
         if status != 200 {
-            let message = match status {
+            let fallback = match status {
                 401 | 403 => "check TYPESAFE_API_KEY",
                 422 => "TypeSafe rejected the System One Call",
                 429 => "rate limit remained after retries",
@@ -83,7 +80,8 @@ pub(crate) fn run_at(
             };
             return Err(Error::TypeSafe {
                 status: Some(status),
-                message: message.to_string(),
+                message: api_error_message(&response_body, api_key, body)
+                    .unwrap_or_else(|| fallback.to_string()),
             });
         }
         let response: Value =
@@ -94,6 +92,54 @@ pub(crate) fn run_at(
         return validate_response(call, response);
     }
     unreachable!("the bounded retry loop always returns or continues to its last attempt")
+}
+
+fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+        .or_else(|| {
+            httpdate::parse_http_date(value)
+                .ok()
+                .map(|deadline| deadline.duration_since(now).unwrap_or_default())
+        })
+}
+
+fn api_error_message(response_body: &str, api_key: &str, call_body: &[u8]) -> Option<String> {
+    let response: Value = serde_json::from_str(response_body).ok()?;
+    let error = response.get("error").unwrap_or(&response);
+    let message = error
+        .as_str()
+        .or_else(|| error.get("message").and_then(Value::as_str))
+        .or_else(|| error.get("detail").and_then(Value::as_str))?;
+    let call_body = String::from_utf8_lossy(call_body);
+    let message = message
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(api_key, "[redacted]")
+        .replace(call_body.as_ref(), "[redacted]");
+    let call: Value = serde_json::from_slice(call_body.as_bytes()).ok()?;
+    if contains_call_text(&call, &message) {
+        return None;
+    }
+    let message: String = message.chars().take(160).collect();
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_string())
+}
+
+fn contains_call_text(call: &Value, message: &str) -> bool {
+    match call {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key.len() >= 4 && message.contains(key)) || contains_call_text(value, message)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_call_text(value, message)),
+        Value::String(value) => value.len() >= 4 && message.contains(value),
+        _ => false,
+    }
 }
 
 fn validate_response(call: &Call, response: Value) -> Result<Value> {
@@ -135,4 +181,26 @@ fn validate_response(call: &Call, response: Value) -> Result<Value> {
     result.insert("answers".to_string(), Value::Object(answers.clone()));
     result.insert("usage".to_string(), Value::Object(usage.clone()));
     Ok(Value::Object(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::retry_after_delay;
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let deadline = now + Duration::from_secs(3);
+        let date = httpdate::fmt_http_date(deadline);
+
+        assert_eq!(retry_after_delay("5", now), Some(Duration::from_secs(5)));
+        assert_eq!(retry_after_delay(&date, now), Some(Duration::from_secs(3)));
+        assert_eq!(
+            retry_after_delay("not a date", now),
+            None,
+            "an invalid header falls back to exponential backoff"
+        );
+    }
 }
