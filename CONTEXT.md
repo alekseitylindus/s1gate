@@ -1,7 +1,7 @@
 # s1gate
 
-s1gate runs local System One decision models natively. It pulls a Checkpoint into a local Model
-Store and judges questions against it, without network access at judgement time.
+s1gate judges System One Calls with local or remote models. It pulls local Checkpoints into a Model
+Store and can call a remote model API when the caller selects one.
 
 ## Language
 
@@ -15,8 +15,8 @@ revision, never by a moving branch name.
 _Avoid_: model, weights, bundle, snapshot
 
 **Pull**:
-Fetching a Checkpoint's required files and recording its Provenance. The only operation that reaches
-the network.
+Fetching a Checkpoint's required files and recording its Provenance. The only operation that
+downloads Checkpoints.
 _Avoid_: download, fetch, install, sync
 
 **Model Store**:
@@ -40,14 +40,19 @@ before loading any weights.
 _Avoid_: key list, index, tensor table
 
 **Backend**:
-The implementation that judges questions against a Checkpoint. Laya is the only Backend in the first
-milestone; Jev is a planned one.
+The implementation that judges Questions in a System One Call, either against a local Checkpoint or
+through a remote model API. Laya is local; Jev is remote.
 _Avoid_: engine, runtime, driver, model type
 
 **Model Identifier**:
 The caller-chosen value of `model` in a System One Call, naming the model that judges its
-Questions. The current identifier names Laya's Model Source; a future identifier may name a proxy.
+Questions. `convaiinnovations/laya` names Laya's Model Source; `jev-latest` names a remote model alias.
 _Avoid_: Model Source when the identifier does not name a local source
+
+**Resolved Model Identifier**:
+The versioned `model` value a remote Backend returns after judging a call made with a model alias.
+It identifies the model that produced the Answers.
+_Avoid_: alias, requested model
 
 **System One Call**:
 One evaluation of Questions against a State using a Model Identifier. A local Backend judges every

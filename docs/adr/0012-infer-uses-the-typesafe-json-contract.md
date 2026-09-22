@@ -1,5 +1,7 @@
 # Infer uses the TypeSafe JSON contract
 
+The response `model` rule below is amended by ADR-0014 for remote model aliases.
+
 `infer` reads one System One Call from stdin and writes one response to stdout using the TypeSafe
 request and response shapes. The request's required `model` field is the Model Identifier;
 `infer` does not take a separate model name flag. The response repeats that identifier. Currently

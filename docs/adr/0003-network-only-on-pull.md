@@ -1,5 +1,7 @@
 # Pull is the only operation that reaches the network
 
+Status: superseded by ADR-0013.
+
 Only Pull may access the network. When a Checkpoint is missing, judgement and serving fail with an
 actionable error pointing at `s1gate pull` instead of fetching it implicitly. Chosen because the
 runtime is expected to run on hosts with no egress, where an implicit fetch would turn a configuration
