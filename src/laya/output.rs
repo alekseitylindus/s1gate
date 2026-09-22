@@ -333,8 +333,10 @@ mod tests {
         );
     }
 
-    /// A `noul` Answer reports the Confidence of the stronger side, so a true side weaker than a
-    /// half reports the false side's probability — the oracle's `max(p, 1 - p)`.
+    /// A `noul` Answer reports the true side's probability against the Confidence of the stronger
+    /// side, so a true side weaker than a half reports the false side's probability as its
+    /// confidence — the oracle's `max(p[1], 1 - p[1])`. Both come from the unrounded calibrated
+    /// probabilities: a third on the true side reports `0.3333` and `0.6667`.
     #[test]
     fn a_noul_answer_reports_the_stronger_sides_probability() {
         let call = Call::from_bytes(
@@ -344,9 +346,11 @@ mod tests {
         // `temperature` falls back to 1.1 for `noul`, so a logit of `ln(3) * 1.1` leaves one side
         // three times the other's odds.
         let odds = (3.0f32).ln() * FALLBACK[2];
-        for (logits, true_side, confidence) in
-            [(vec![0.0, odds], 0.75, 0.75), (vec![odds, 0.0], 0.25, 0.75)]
-        {
+        for (logits, true_side, confidence) in [
+            (vec![0.0, odds], 0.75, 0.75),
+            (vec![odds, 0.0], 0.25, 0.75),
+            (vec![0.0, (0.5f32).ln() * FALLBACK[2]], 0.3333, 0.6667),
+        ] {
             let result = format_result(
                 &call,
                 &agent(&[]),
@@ -362,6 +366,42 @@ mod tests {
                 serde_json::json!(confidence)
             );
         }
+    }
+
+    /// A `noul` Question calibrates by its own Type and its two Options: `noul:2` is the entry the
+    /// released Checkpoint fits, and the per-Type `temperature` is only what a Checkpoint without
+    /// that entry falls back to. A true-side logit of `-2` is worth `e^-1` of the false side's odds
+    /// at a Calibration Temperature of two, and `e^-1.8181` of them at the fallback of 1.1.
+    #[test]
+    fn a_noul_question_takes_its_own_two_option_calibration_temperature() {
+        let call = Call::from_bytes(
+            br#"{"state":"x","questions":{"q":{"type":"noul","instructions":"x"}}}"#,
+        )
+        .unwrap();
+        let judge = |agent: &AgentConfig| {
+            format_result(
+                &call,
+                agent,
+                &[prepared(QuestionType::Noul, &["false", "true"], 3)],
+                vec![vec![0.0, -2.0]],
+                vec![vec![0.5]],
+            )
+            .unwrap()
+        };
+
+        let fitted = judge(&agent(&[("noul:2", 2.0)]));
+        assert_eq!(fitted["answers"]["q"]["noul"], serde_json::json!(0.2689));
+        assert_eq!(
+            fitted["answers"]["q"]["confidence"],
+            serde_json::json!(0.7311)
+        );
+
+        let fallback = judge(&agent(&[]));
+        assert_eq!(fallback["answers"]["q"]["noul"], serde_json::json!(0.1397));
+        assert_eq!(
+            fallback["answers"]["q"]["confidence"],
+            serde_json::json!(0.8603)
+        );
     }
 
     /// The `6-10` band of `temperature_by_options` is looked up, not skipped, and the bands meet
@@ -557,22 +597,26 @@ mod tests {
         );
     }
 
-    /// One Call of several Question Types is judged as a whole: every Question's Answer appears
-    /// under its own id, and `usage.input_tokens` is the total the whole call took.
+    /// One Call of all three Question Types is judged as a whole: every Question's Answer appears
+    /// under its own id, a `noul` Answer carries the true side's probability and its Confidence in
+    /// place of a distribution and a legend, and `usage.input_tokens` is the total the whole call
+    /// took.
     #[test]
     fn a_mixed_call_reports_one_whole_call_token_total() {
         let call = Call::from_bytes(br#"{"state":"x","questions":{
             "route":{"type":"choice","instructions":"x","criteria":["billing","shipping","account"]},
-            "urgency":{"type":"score","instructions":"x","criteria":["low","high","normal"]}}}"#).unwrap();
+            "urgency":{"type":"score","instructions":"x","criteria":["low","high","normal"]},
+            "churn_risk":{"type":"noul","instructions":"x"}}}"#).unwrap();
         let result = format_result(
             &call,
             &agent(&[]),
             &[
                 prepared(QuestionType::Choice, &["billing", "shipping", "account"], 4),
                 prepared(QuestionType::Score, &["low", "high", "normal"], 5),
+                prepared(QuestionType::Noul, &["false", "true"], 3),
             ],
-            vec![vec![0.0; 3], vec![0.0; 3]],
-            vec![vec![0.25], vec![0.75]],
+            vec![vec![0.0; 3], vec![0.0; 3], vec![0.0; 2]],
+            vec![vec![0.25], vec![0.75], vec![0.5]],
         )
         .unwrap();
 
@@ -587,8 +631,16 @@ mod tests {
             0.75
         );
         assert_eq!(
+            result["answers"]["churn_risk"],
+            serde_json::json!({
+                "type": "noul", "noul": 0.5, "confidence": 0.5,
+                "action": {"act_probability": 0.5}
+            }),
+            "a noul Answer reports no distribution and no legend"
+        );
+        assert_eq!(
             result["usage"],
-            serde_json::json!({"input_tokens": 9, "output_tokens": 0})
+            serde_json::json!({"input_tokens": 12, "output_tokens": 0})
         );
     }
 }

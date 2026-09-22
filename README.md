@@ -130,6 +130,11 @@ the shape of one:
 }
 ```
 
+A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
+as JSON. `null` and `""` mean an Option is named without a description, so `0` and `false` describe
+an Option rather than standing in for one. `score` and array-valued `choice` Criteria hold strings,
+so their Levels and Options are rendered as they are.
+
 Numbers are rounded half-to-even at four decimal places, matching the original implementation.
 
 ## Model Store

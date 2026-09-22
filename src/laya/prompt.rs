@@ -1,6 +1,5 @@
 //! Python-runtime-compatible prompt construction and token budgeting.
 
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -108,82 +107,19 @@ fn encode(tokenizer: &Tokenizer, text: &str) -> Result<Vec<u32>> {
     Ok(encoding.get_ids().to_vec())
 }
 
-fn render_value(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| python_repr(value))
-}
-
-fn python_repr(value: &Value) -> String {
+/// One Criteria value as the original implementation renders it into a prompt: a string as it
+/// stands, anything structured as compact JSON.
+fn render_criterion(value: &Value) -> Result<String> {
     match value {
-        Value::Null => "None".to_string(),
-        Value::Bool(true) => "True".to_string(),
-        Value::Bool(false) => "False".to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::String(text) => python_quote(text),
-        Value::Array(values) => {
-            let mut out = String::from("[");
-            for (index, item) in values.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                let _ = write!(out, "{}", python_repr(item));
-            }
-            out.push(']');
-            out
-        }
-        Value::Object(values) => {
-            let mut out = String::from("{");
-            for (index, (key, value)) in values.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                let _ = write!(out, "{}: {}", python_quote(key), python_repr(value));
-            }
-            out.push('}');
-            out
-        }
+        Value::String(text) => Ok(text.clone()),
+        value => python_json(value, "a Criteria value"),
     }
 }
 
-fn python_quote(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut quoted = String::with_capacity(text.len() + 2);
-    quoted.push(quote);
-    for character in text.chars() {
-        match character {
-            '\\' => quoted.push_str("\\\\"),
-            character if character == quote => {
-                quoted.push('\\');
-                quoted.push(character);
-            }
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            '\t' => quoted.push_str("\\t"),
-            character if character.is_control() => {
-                let _ = write!(quoted, "\\x{:02x}", u32::from(character));
-            }
-            character => quoted.push(character),
-        }
-    }
-    quoted.push(quote);
-    quoted
-}
-
-fn is_python_falsy(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Bool(value) => !value,
-        Value::Number(value) => value.as_f64() == Some(0.0),
-        Value::String(value) => value.is_empty(),
-        Value::Array(value) => value.is_empty(),
-        Value::Object(value) => value.is_empty(),
-    }
+/// Whether a Criteria value carries a description. Only `null` and the empty string do not, so
+/// `0` and `false` describe an Option like any other value does.
+fn describes(value: &Value) -> bool {
+    !(value.is_null() || value.as_str() == Some(""))
 }
 
 /// The rendered Options of a Question and the response names its Question Type reports.
@@ -192,55 +128,60 @@ struct Rendered {
     responses: Responses,
 }
 
-fn render_options(question: &Question) -> Rendered {
+fn render_options(question: &Question) -> Result<Rendered> {
     match question.kind {
         QuestionType::Choice => match question.criteria.as_ref() {
             Some(Criteria::Object(options)) => {
-                let rendered = options
-                    .iter()
-                    .map(|(name, value)| {
-                        if is_python_falsy(value) {
-                            name.clone()
-                        } else {
-                            format!("{name}: {}", render_value(value))
-                        }
-                    })
-                    .collect();
-                let labels = options.iter().map(|(name, _)| name.clone()).collect();
-                Rendered {
+                let mut rendered = Vec::with_capacity(options.len());
+                let mut labels = Vec::with_capacity(options.len());
+                for (name, value) in options {
+                    rendered.push(if describes(value) {
+                        format!("{name}: {}", render_criterion(value)?)
+                    } else {
+                        name.clone()
+                    });
+                    labels.push(name.clone());
+                }
+                Ok(Rendered {
                     options: rendered,
                     responses: Responses::Labels(labels),
-                }
+                })
             }
             Some(Criteria::List(options)) => {
-                let rendered = options.iter().map(render_value).collect::<Vec<_>>();
-                Rendered {
+                let rendered = options
+                    .iter()
+                    .map(render_criterion)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Rendered {
                     options: rendered.clone(),
                     responses: Responses::Labels(rendered),
-                }
+                })
             }
-            None => Rendered {
+            None => Ok(Rendered {
                 options: Vec::new(),
                 responses: Responses::Labels(Vec::new()),
-            },
+            }),
         },
         QuestionType::Score => match question.criteria.as_ref() {
             Some(Criteria::List(levels)) => {
-                let levels = levels.iter().map(render_value).collect::<Vec<_>>();
+                let levels = levels
+                    .iter()
+                    .map(render_criterion)
+                    .collect::<Result<Vec<_>>>()?;
                 let rendered = levels
                     .iter()
                     .enumerate()
                     .map(|(index, level)| format!("level {index}: {level}"))
                     .collect();
-                Rendered {
+                Ok(Rendered {
                     options: rendered,
                     responses: Responses::Levels(levels),
-                }
+                })
             }
-            _ => Rendered {
+            _ => Ok(Rendered {
                 options: Vec::new(),
                 responses: Responses::Levels(Vec::new()),
-            },
+            }),
         },
         QuestionType::Noul => {
             let descriptions = question
@@ -250,28 +191,22 @@ fn render_options(question: &Question) -> Rendered {
                     Criteria::Object(options) => Some(options),
                     Criteria::List(_) => None,
                 });
-            let render = |name: &str, fallback: &str| {
-                descriptions
-                    .and_then(|options| options.iter().find(|(key, _)| key == name))
-                    .map(|(_, value)| {
-                        if is_python_falsy(value) {
-                            fallback.to_string()
-                        } else {
-                            render_value(value)
-                        }
-                    })
-                    .unwrap_or_else(|| fallback.to_string())
+            let render = |name: &str, fallback: &str| -> Result<String> {
+                match descriptions.and_then(|options| options.iter().find(|(key, _)| key == name)) {
+                    Some((_, value)) if describes(value) => render_criterion(value),
+                    _ => Ok(fallback.to_string()),
+                }
             };
-            Rendered {
+            Ok(Rendered {
                 options: vec![
                     format!(
                         "false: {}",
-                        render("false", "no, the statement does not hold")
+                        render("false", "no, the statement does not hold")?
                     ),
-                    format!("true: {}", render("true", "yes, the statement holds")),
+                    format!("true: {}", render("true", "yes, the statement holds")?),
                 ],
                 responses: Responses::Unnamed,
-            }
+            })
         }
     }
 }
@@ -285,7 +220,7 @@ pub(super) fn prepare(
     call.questions
         .iter()
         .map(|(_, question)| {
-            let Rendered { options, responses } = render_options(question);
+            let Rendered { options, responses } = render_options(question)?;
             let mut head = encode(
                 tokenizer,
                 &format!(
@@ -392,23 +327,36 @@ fn serialize_state(state: &Value) -> Result<String> {
     if let Some(state) = state.as_str() {
         return Ok(state.to_string());
     }
+    python_json(state, "state")
+}
+
+/// Serialize `value` the way the original implementation writes it: `", "` between items, `": "`
+/// after a key, and non-ASCII left as it stands rather than escaped. `what` names the value in the
+/// error.
+fn python_json(value: &Value, what: &str) -> Result<String> {
     let mut bytes = Vec::new();
-    state
+    value
         .serialize(&mut serde_json::Serializer::with_formatter(
             &mut bytes,
             PythonJsonFormatter,
         ))
         .map_err(|error| Error::Inference {
-            message: format!("serializing state: {error}"),
+            message: format!("serializing {what}: {error}"),
         })?;
     String::from_utf8(bytes).map_err(|error| Error::Inference {
-        message: format!("serializing state as utf-8: {error}"),
+        message: format!("serializing {what} as utf-8: {error}"),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Options and response names a Question renders to, unwrapped: rendering a value that
+    /// came out of JSON cannot fail.
+    fn render(question: &Question) -> Rendered {
+        render_options(question).unwrap()
+    }
 
     #[test]
     fn structured_state_uses_python_json_spacing() {
@@ -424,7 +372,7 @@ mod tests {
         let call = Call::from_bytes(br#"{"state":"x","questions":{"urgency":{"type":"score","instructions":"x","criteria":["immediate","low","normal","high"]}}}"#).unwrap();
         let (_, question) = call.questions.iter().next().unwrap();
 
-        let rendered = render_options(question);
+        let rendered = render(question);
 
         assert_eq!(
             rendered.options,
@@ -442,38 +390,81 @@ mod tests {
         assert!(rendered.responses.labels().is_empty());
     }
 
+    /// A Criteria description carries the value the caller wrote. Only `null` and the empty string
+    /// mean there is no description, so `false` and `0` are descriptions; a string is left as it
+    /// stands; and anything structured renders as JSON — with Python's own spacing and non-ASCII
+    /// unescaped — rather than as a Python repr, which is what the original implementation put in a
+    /// prompt before it was fixed.
     #[test]
-    fn criteria_render_like_the_checkpoint_runtime() {
-        let call = Call::from_bytes(br#"{"state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"array":[],"object":{},"yes":"ok","structured":{"flag":true}}},"score":{"type":"score","instructions":"x","criteria":["low","high"]},"noul":{"type":"noul","instructions":"x","criteria":{"false":false,"true":0}}}}"#).unwrap();
+    fn criteria_render_their_descriptions() {
+        let call = Call::from_bytes(br#"{"state":"x","questions":{"choice":{"type":"choice","instructions":"x","criteria":{"nil":null,"empty":"","false":false,"zero":0,"list":["a",2],"object":{"flag":true,"\u043a\u043b\u044e\u0447":"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435"},"yes":"ok"}},"score":{"type":"score","instructions":"x","criteria":["low","high"]}}}"#).unwrap();
         let mut questions = call.questions.iter();
         let (_, choice) = questions.next().unwrap();
         let (_, score) = questions.next().unwrap();
-        let (_, noul) = questions.next().unwrap();
+
         assert_eq!(
-            render_options(choice).options,
+            render(choice).options,
             [
                 "nil",
                 "empty",
-                "false",
-                "zero",
-                "array",
-                "object",
-                "yes: ok",
-                "structured: {'flag': True}"
+                "false: false",
+                "zero: 0",
+                "list: [\"a\", 2]",
+                "object: {\"flag\": true, \"ключ\": \"значение\"}",
+                "yes: ok"
+            ]
+        );
+        assert_eq!(render(score).options, ["level 0: low", "level 1: high"]);
+    }
+
+    /// A `noul` Question always renders the false Option and then the true one, whatever order
+    /// its Criteria wrote them in, with the descriptions its Criteria give and the stock sentences
+    /// only where they give none. Its Options are named by nothing, which is why a `noul` Answer
+    /// carries neither probabilities nor a legend.
+    #[test]
+    fn noul_renders_the_false_option_then_the_true_one() {
+        let call = Call::from_bytes(br#"{"state":"x","questions":{
+            "described":{"type":"noul","instructions":"x","criteria":{"true":"yes","false":"no"}},
+            "falsy":{"type":"noul","instructions":"x","criteria":{"false":false,"true":0}},
+            "structured":{"type":"noul","instructions":"x","criteria":{"false":{"reason":"stays"},"true":["leaves","churns"]}},
+            "blank":{"type":"noul","instructions":"x","criteria":{"false":"","true":null}},
+            "plain":{"type":"noul","instructions":"x"}}}"#).unwrap();
+        let options = |id: &str| {
+            let (_, question) = call.questions.iter().find(|(name, _)| *name == id).unwrap();
+            render(question).options
+        };
+
+        assert_eq!(options("described"), ["false: no", "true: yes"]);
+        assert_eq!(options("falsy"), ["false: false", "true: 0"]);
+        assert_eq!(
+            options("structured"),
+            [
+                "false: {\"reason\": \"stays\"}",
+                "true: [\"leaves\", \"churns\"]"
             ]
         );
         assert_eq!(
-            render_options(score).options,
-            ["level 0: low", "level 1: high"]
-        );
-        assert_eq!(
-            render_options(noul).options,
+            options("blank"),
             [
                 "false: no, the statement does not hold",
                 "true: yes, the statement holds"
             ]
         );
-        assert_eq!(python_quote("it's fine"), r#""it's fine""#);
-        assert_eq!(python_quote("a\u{1b}b"), r#"'a\x1bb'"#);
+        assert_eq!(
+            options("plain"),
+            [
+                "false: no, the statement does not hold",
+                "true: yes, the statement holds"
+            ]
+        );
+
+        let (_, plain) = call
+            .questions
+            .iter()
+            .find(|(name, _)| *name == "plain")
+            .unwrap();
+        let rendered = render(plain);
+        assert!(rendered.responses.labels().is_empty());
+        assert!(rendered.responses.levels().is_empty());
     }
 }

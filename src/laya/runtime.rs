@@ -848,10 +848,18 @@ mod tests {
         let special = tiny_special();
         let choice = || question(QuestionType::Choice, &[5, 6, 7], &[1, 2]);
         let score = || question(QuestionType::Score, &[4, 5, 6, 7, 8], &[0, 1, 2, 3]);
+        let noul = || question(QuestionType::Noul, &[6, 7, 8, 9], &[2, 3]);
 
         let Forward {
             logits: batched, ..
-        } = forward(&config, &agent, &weights, &[choice(), score()], &special).unwrap();
+        } = forward(
+            &config,
+            &agent,
+            &weights,
+            &[choice(), score(), noul()],
+            &special,
+        )
+        .unwrap();
         let Forward {
             logits: choice_alone,
             ..
@@ -860,9 +868,15 @@ mod tests {
             logits: score_alone,
             ..
         } = forward(&config, &agent, &weights, &[score()], &special).unwrap();
+        let Forward {
+            logits: noul_alone, ..
+        } = forward(&config, &agent, &weights, &[noul()], &special).unwrap();
 
-        assert_eq!(batched.len(), 2, "the batch holds one row per Question");
-        for (row, alone) in batched.iter().zip([&choice_alone[0], &score_alone[0]]) {
+        assert_eq!(batched.len(), 3, "the batch holds one row per Question");
+        for (row, alone) in batched
+            .iter()
+            .zip([&choice_alone[0], &score_alone[0], &noul_alone[0]])
+        {
             for (value, alone) in row.iter().zip(alone) {
                 assert!(
                     (value - alone).abs() < 1e-5,
