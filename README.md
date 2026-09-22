@@ -1,7 +1,7 @@
 # s1gate
 
-s1gate runs local System One decision models natively. It pulls a Checkpoint into a local Model
-Store and judges questions against it, without network access at judgement time.
+s1gate judges System One Calls with local Laya Checkpoints or `TypeSafe`'s hosted Jev Backend. Pull
+stores local Checkpoints; choosing Jev sends the call to `TypeSafe`.
 
 The vocabulary is [CONTEXT.md](CONTEXT.md); the decisions behind the design are in
 [docs/adr](docs/adr).
@@ -24,7 +24,7 @@ The binary lands at `target/release/s1gate` and links nothing but Accelerate and
 
 ### `s1gate pull`
 
-Pull is the only command that reaches the network (ADR-0003). Without an argument it lists the
+Pull is the only command that downloads Checkpoints (ADR-0013). Without an argument it lists the
 curated Model Sources, each with the revision the Model Store already holds for it:
 
 ```console
@@ -60,9 +60,10 @@ verified convaiinnovations/laya@1c5edc17a7acd8701df6fc341c0d179f1c62c982 (5 file
 
 ### `s1gate infer`
 
-Judge exactly one System One Call, read as JSON on stdin, against a stored Checkpoint. Its `model`
-field is the Model Identifier; currently it selects the supported local Model Source, and the
-response repeats that identifier. The Answers are written as JSON on stdout:
+Judge exactly one System One Call, read as JSON on stdin. Set `model` to
+`convaiinnovations/laya` to use its stored Checkpoint, or `jev-latest` to use `TypeSafe`'s hosted
+Backend. Laya reports the requested Model Identifier. Jev reports the versioned Resolved Model
+Identifier from `TypeSafe`. The Answers are written as JSON on stdout:
 
 ```console
 $ s1gate infer < call.json
@@ -127,6 +128,9 @@ strings, objects, or arrays. The numbers below only show the shape of one respon
   "usage": { "input_tokens": 214, "output_tokens": 0 }
 }
 ```
+
+To use Jev, set `model` to `jev-latest` and provide `TYPESAFE_API_KEY`. That choice sends the call's
+State and Questions to `TypeSafe`. Laya uses its stored Checkpoint and makes no network request.
 
 A description reaches the prompt as the caller wrote it: a string as it stands, anything structured
 as JSON. `choice` Criteria is an object whose values are strings, objects, arrays, or `null`.

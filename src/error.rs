@@ -88,6 +88,13 @@ pub enum Error {
         /// The failure that stopped inference, or writing its result.
         message: String,
     },
+    /// The remote `TypeSafe` Backend could not judge the call.
+    TypeSafe {
+        /// The HTTP status, when `TypeSafe` answered.
+        status: Option<u16>,
+        /// A short diagnostic without request data or credentials.
+        message: String,
+    },
     /// The Pull did not carry the number of bytes the Model Source announced.
     SizeMismatch {
         /// The file the Pull was writing.
@@ -232,6 +239,9 @@ impl Error {
             | Self::UnsupportedModelIdentifier { .. }
             | Self::InvalidName { .. }
             | Self::InvalidCall { .. } => 2,
+            Self::TypeSafe {
+                status: Some(422), ..
+            } => 2,
             Self::NoStoreRoot
             | Self::RevisionNotFound { .. }
             | Self::UnresolvedRevision { .. }
@@ -241,6 +251,7 @@ impl Error {
             | Self::Transport { .. }
             | Self::MissingCheckpoint { .. }
             | Self::Inference { .. }
+            | Self::TypeSafe { .. }
             | Self::SizeMismatch { .. }
             | Self::ChecksumMismatch { .. }
             | Self::RevisionHeld { .. }
@@ -307,6 +318,14 @@ impl fmt::Display for Error {
                 "Checkpoint `{name}` is not in the Model Store; run `s1gate pull {name}` first"
             ),
             Self::Inference { message } => write!(f, "native inference failed: {message}"),
+            Self::TypeSafe {
+                status: Some(status),
+                message,
+            } => write!(f, "TypeSafe answered HTTP {status}: {message}"),
+            Self::TypeSafe {
+                status: None,
+                message,
+            } => write!(f, "TypeSafe inference failed: {message}"),
             Self::SizeMismatch {
                 path,
                 expected,
@@ -398,6 +417,7 @@ impl std::error::Error for Error {
             | Self::InvalidCall { .. }
             | Self::MissingCheckpoint { .. }
             | Self::Inference { .. }
+            | Self::TypeSafe { .. }
             | Self::SizeMismatch { .. }
             | Self::ChecksumMismatch { .. }
             | Self::RevisionHeld { .. }

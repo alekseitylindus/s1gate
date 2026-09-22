@@ -2,6 +2,7 @@
 
 mod commands;
 mod laya;
+mod typesafe;
 
 pub mod call;
 pub mod checkpoint;

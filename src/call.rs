@@ -220,7 +220,7 @@ impl Question {
     }
 }
 
-/// TypeSafe's structured input values are strings, objects, and arrays.
+/// `TypeSafe`'s structured input values are strings, objects, and arrays.
 fn is_typesafe_value(value: &Value) -> bool {
     matches!(value, Value::String(_) | Value::Object(_) | Value::Array(_))
 }

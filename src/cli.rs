@@ -25,7 +25,7 @@ enum Command {
     /// Without a Model Source, lists the Model Sources s1gate can pull, each with the revision of
     /// the Checkpoint the Model Store already holds for it.
     Pull(commands::pull::Args),
-    /// Judge one System One Call from JSON on stdin without network access
+    /// Judge one System One Call from JSON on stdin with a local or remote Backend
     Infer,
     /// Verify stored Checkpoints against their Provenance without network access
     Verify(commands::verify::Args),
