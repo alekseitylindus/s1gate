@@ -674,6 +674,61 @@ fn infer_escapes_a_duplicated_question_id_it_rejects() {
     assert!(!run.stderr.contains('\u{1b}'), "{}", run.stderr);
 }
 
+#[test]
+#[ignore = "requires a pulled MLX checkpoint in LAYA_MODEL_DIR and the Metal toolchain"]
+fn infer_runs_a_real_laya_checkpoint() {
+    let checkpoint = std::env::var_os("LAYA_MODEL_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("set LAYA_MODEL_DIR to a pulled convaiinnovations/laya checkpoint");
+    assert!(
+        checkpoint.join("provenance.json").is_file(),
+        "LAYA_MODEL_DIR must contain provenance.json"
+    );
+
+    let data_home = TempDir::new("cli-laya-e2e");
+    let model = data_home
+        .path()
+        .join("s1gate/models/convaiinnovations/laya");
+    fs::create_dir_all(model.parent().expect("the model has a parent"))
+        .expect("the test Model Store");
+    std::os::unix::fs::symlink(&checkpoint, &model).expect("the checkpoint symlink");
+
+    let run = run_in_with_input(
+        &data_home,
+        &["infer", "--name", "convaiinnovations/laya"],
+        r#"{
+            "state": {"message": "The light is on."},
+            "questions": {
+                "lit": {
+                    "type": "choice",
+                    "instructions": "Is the light on?",
+                    "criteria": {"no": null, "yes": null}
+                }
+            }
+        }"#,
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+
+    let result: serde_json::Value =
+        serde_json::from_str(&run.stdout).expect("inference returns JSON");
+    assert_eq!(result["model"], "rl-agent");
+    assert_eq!(result["answers"]["lit"]["type"], "choice");
+    let probabilities = result["answers"]["lit"]["probabilities"]
+        .as_object()
+        .expect("choice probabilities");
+    let total = probabilities
+        .values()
+        .map(|value| value.as_f64().expect("a numeric probability"))
+        .inspect(|value| assert!((0.0..=1.0).contains(value)))
+        .sum::<f64>();
+    assert!((total - 1.0).abs() < 0.001, "probabilities sum to {total}");
+    let action = result["answers"]["lit"]["rl_agent"]["act_probability"]
+        .as_f64()
+        .expect("a numeric action probability");
+    assert!((0.0..=1.0).contains(&action));
+    assert_eq!(result["usage"]["output_tokens"], 0);
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -699,6 +754,10 @@ fn run_in(data_home: &TempDir, args: &[&str]) -> Run {
 
 fn run_with_input(args: &[&str], input: impl AsRef<[u8]>) -> Run {
     let data_home = TempDir::new("cli-infer");
+    run_in_with_input(&data_home, args, input)
+}
+
+fn run_in_with_input(data_home: &TempDir, args: &[&str], input: impl AsRef<[u8]>) -> Run {
     let mut child = Command::new(binary())
         .args(args)
         .env("XDG_DATA_HOME", data_home.path())

@@ -39,8 +39,6 @@ pub enum Error {
     InvalidCall { message: String },
     /// The requested Checkpoint is not in the local Model Store.
     MissingCheckpoint { name: String },
-    /// The input contract exists before native inference does.
-    InferenceUnavailable,
     /// Native inference failed after the call and Checkpoint were validated.
     Inference { message: String },
     /// The Pull did not carry the number of bytes the Model Source announced.
@@ -191,9 +189,6 @@ impl fmt::Display for Error {
                 f,
                 "Checkpoint `{name}` is not in the Model Store; run `s1gate pull {name}` first"
             ),
-            Error::InferenceUnavailable => {
-                write!(f, "native inference is not available yet")
-            }
             Error::Inference { message } => write!(f, "native inference failed: {message}"),
             Error::SizeMismatch {
                 path,
