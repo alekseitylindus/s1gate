@@ -18,10 +18,10 @@ use crate::error::{Error, Result};
 use crate::model_source::ModelSource;
 use crate::store::Store;
 
-use config::{read_agent_config, read_encoder_config, validate_config};
+use config::{AgentConfig, EncoderConfig, read_agent_config, read_encoder_config, validate_config};
 use output::format_result;
 use prompt::{prepare, special_tokens};
-use runtime::{Forward, forward, load_weights};
+use runtime::{Forward, Weights, forward, load_weights};
 
 #[derive(Debug)]
 pub(super) struct SpecialTokens {
@@ -40,20 +40,51 @@ pub(super) struct SpecialTokens {
 /// the Checkpoint configuration is missing or invalid, when the tokenizer cannot be loaded, when
 /// the prompt does not fit the token budget, or when native inference fails.
 pub fn run(store: &Store, source: &ModelSource, call: &Call) -> Result<Value> {
-    let directory = store.checkpoint_dir(source.repo)?;
-    checkpoint::verify(store, source)?;
-    let agent = read_agent_config(&directory.join("rl_agent_config.json"))?;
-    let encoder = read_encoder_config(&directory.join("encoder/config.json"))?;
-    validate_config(&encoder, &agent)?;
-    let tokenizer =
-        Tokenizer::from_file(directory.join("tokenizer/tokenizer.json")).map_err(|error| {
-            Error::Inference {
-                message: format!("loading tokenizer: {error}"),
-            }
-        })?;
-    let special = special_tokens(&directory, &tokenizer)?;
-    let prepared = prepare(call, &tokenizer, &special, &agent)?;
-    let weights = load_weights(&directory.join("model.safetensors"))?;
-    let Forward { logits, .. } = forward(&encoder, &agent, &weights, &prepared, &special)?;
-    format_result(call, &agent, &prepared, logits)
+    Loaded::load(store, source)?.run(call)
+}
+
+/// A Checkpoint's resources, held for repeated Calls by the HTTP server.
+pub(crate) struct Loaded {
+    agent: AgentConfig,
+    encoder: EncoderConfig,
+    tokenizer: Tokenizer,
+    special: SpecialTokens,
+    weights: Weights,
+}
+
+impl Loaded {
+    pub(crate) fn load(store: &Store, source: &ModelSource) -> Result<Self> {
+        let directory = store.checkpoint_dir(source.repo)?;
+        checkpoint::verify(store, source)?;
+        let agent = read_agent_config(&directory.join("rl_agent_config.json"))?;
+        let encoder = read_encoder_config(&directory.join("encoder/config.json"))?;
+        validate_config(&encoder, &agent)?;
+        let tokenizer =
+            Tokenizer::from_file(directory.join("tokenizer/tokenizer.json")).map_err(|error| {
+                Error::Inference {
+                    message: format!("loading tokenizer: {error}"),
+                }
+            })?;
+        let special = special_tokens(&directory, &tokenizer)?;
+        let weights = load_weights(&directory.join("model.safetensors"))?;
+        Ok(Self {
+            agent,
+            encoder,
+            tokenizer,
+            special,
+            weights,
+        })
+    }
+
+    pub(crate) fn run(&self, call: &Call) -> Result<Value> {
+        let prepared = prepare(call, &self.tokenizer, &self.special, &self.agent)?;
+        let Forward { logits, .. } = forward(
+            &self.encoder,
+            &self.agent,
+            &self.weights,
+            &prepared,
+            &self.special,
+        )?;
+        format_result(call, &self.agent, &prepared, logits)
+    }
 }

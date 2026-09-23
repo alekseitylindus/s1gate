@@ -31,6 +31,8 @@ enum Command {
     Verify(commands::verify::Args),
     /// List Model Identifiers currently available to infer
     Models,
+    /// Serve System One Calls over HTTP
+    Serve(commands::serve::Args),
 }
 
 /// Parse the command line, run the command, and report what it did. Exit codes are the caller's:
@@ -46,5 +48,6 @@ pub fn run() -> Result<()> {
         Command::Infer => commands::infer::run(),
         Command::Verify(args) => commands::verify::run(args),
         Command::Models => commands::models::run(),
+        Command::Serve(args) => commands::serve::run(args),
     }
 }

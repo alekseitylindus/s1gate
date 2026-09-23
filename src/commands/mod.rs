@@ -9,6 +9,7 @@ use crate::store::Store;
 pub mod infer;
 pub mod models;
 pub mod pull;
+pub mod serve;
 pub mod verify;
 
 /// The curated Model Source `name` addresses. A command that addresses a Checkpoint takes one full

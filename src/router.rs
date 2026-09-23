@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::call::Call;
 use crate::error::{Error, Result};
+use crate::laya::Loaded;
 use crate::model_source;
 use crate::store::Store;
 
@@ -16,6 +17,12 @@ pub struct ModelRouter {
     env_api_key: Option<OsString>,
     xdg_config_home: Option<PathBuf>,
     home: Option<PathBuf>,
+    local: Local,
+}
+
+enum Local {
+    FromStore,
+    Loaded(Option<Loaded>),
 }
 
 impl ModelRouter {
@@ -29,6 +36,19 @@ impl ModelRouter {
         )
     }
 
+    /// Load present local Checkpoints once for the HTTP server.
+    pub(crate) fn for_server() -> Result<Self> {
+        let store = Store::from_env()?;
+        let local = if store.provenance(model_source::LAYA.repo)?.is_some() {
+            Some(Loaded::load(&store, &model_source::LAYA)?)
+        } else {
+            None
+        };
+        let mut router = Self::from_env();
+        router.local = Local::Loaded(local);
+        Ok(router)
+    }
+
     pub(crate) fn with_settings(
         endpoint: &str,
         env_api_key: Option<OsString>,
@@ -40,6 +60,7 @@ impl ModelRouter {
             env_api_key,
             xdg_config_home,
             home,
+            local: Local::FromStore,
         }
     }
 
@@ -66,13 +87,21 @@ impl ModelRouter {
             );
         }
         let source = model_source::lookup_identifier(&call.model)?;
-        let store = Store::from_env()?;
-        if store.provenance(source.repo)?.is_none() {
-            return Err(Error::MissingCheckpoint {
+        match &self.local {
+            Local::FromStore => {
+                let store = Store::from_env()?;
+                if store.provenance(source.repo)?.is_none() {
+                    return Err(Error::MissingCheckpoint {
+                        name: source.repo.to_string(),
+                    });
+                }
+                crate::laya::run(&store, source, &call)
+            }
+            Local::Loaded(Some(local)) => local.run(&call),
+            Local::Loaded(None) => Err(Error::MissingCheckpoint {
                 name: source.repo.to_string(),
-            });
+            }),
         }
-        crate::laya::run(&store, source, &call)
     }
 }
 

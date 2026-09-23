@@ -171,6 +171,18 @@ give either or both of `true` and `false` descriptions with those same types.
 
 Numbers are rounded half-to-even at four decimal places, matching the original implementation.
 
+### `s1gate serve`
+
+Serve System One Calls at `POST /v1/systemone`. The listener defaults to `127.0.0.1:8080`;
+`--host` and `--port` set another address. Send the same JSON Call used by `infer` with
+`Content-Type: application/json`. Valid Calls receive HTTP 200 with the `TypeSafe` response shape.
+Invalid Calls receive HTTP 422 with a `detail` array.
+
+At startup, the server loads each present local Checkpoint and stops if one is invalid. It skips
+absent Checkpoints. Local Calls run sequentially against the loaded Checkpoint until restart, so
+changes to the Model Store take effect after a restart. The server never Pulls a Checkpoint.
+Incoming Authorization is optional; Jev Calls use the server's configured `TYPESAFE_API_KEY`.
+
 ## Model Store
 
 The Model Store lives at `$XDG_DATA_HOME/s1gate/models`, defaulting to
