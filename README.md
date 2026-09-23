@@ -108,8 +108,10 @@ A call is a State plus the Questions to judge against it:
 A Question is one of exactly three types. `choice` picks a labelled Option and reports the
 distribution over them; `score` reports the probability-weighted index over ordered Levels;
 `noul` reports the probability of the true side. Answers keep the caller's Question ids. `choice`
-accepts 2 to 255 named Options; `score` accepts 2 to 10 Levels. `state` and `instructions` can be
-strings, objects, or arrays. The numbers below only show the shape of one response:
+accepts 1 to 255 named Options locally; `score` accepts 1 to 10 Levels locally. Jev calls follow
+the published TypeSafe schema, which places no Option count limit on Choice. `state` can be a
+string, object, or array. `instructions` can also be omitted or null. The numbers below only show
+the shape of one response:
 
 ```json
 {

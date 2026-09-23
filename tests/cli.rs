@@ -344,25 +344,25 @@ fn infer_rejects_trailing_json() {
 }
 
 #[test]
-fn infer_rejects_a_choice_with_one_option_before_loading_the_checkpoint() {
-    let run = run_infer_with_laya_model_identifier(
-        r#"{
-            "state": "x",
-            "questions": {
-                "route": {
-                    "type": "choice",
-                    "instructions": "Where should this go?",
-                    "criteria": {"billing": "payments"}
-                }
-            }
-        }"#,
+fn infer_judges_single_option_and_single_level_locally() {
+    let data_home = TempDir::new("cli-infer-singletons");
+    fixture::write_inferable(&checkpoint_root(&data_home));
+    let run = run_in_with_input(
+        &data_home,
+        &["infer"],
+        r#"{"model":"convaiinnovations/laya","state":"x","questions":{"route":{"type":"choice","criteria":{"billing":null}},"urgency":{"type":"score","criteria":["low"]}}}"#,
     );
 
-    assert_eq!(run.code, 2);
-    assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("route"), "{}", run.stderr);
-    assert!(run.stderr.contains("at least two"), "{}", run.stderr);
-    assert!(run.stderr.contains("Options"), "{}", run.stderr);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("response JSON");
+    assert_eq!(response["answers"]["route"]["choice"], "billing");
+    assert_eq!(
+        response["answers"]["route"]["probabilities"]["billing"],
+        1.0
+    );
+    assert_eq!(response["answers"]["urgency"]["score"], 0.0);
+    assert_eq!(response["answers"]["urgency"]["legend"]["0"], "low");
+    assert_eq!(response["answers"]["urgency"]["probabilities"]["0"], 1.0);
 }
 
 #[test]
@@ -401,7 +401,23 @@ fn infer_rejects_an_uncurated_model_source_before_locating_the_store() {
 
 #[test]
 fn infer_routes_jev_aliases_and_versions_to_typesafe() {
-    for model in ["jev-latest", "jev-1.13.0"] {
+    for (model, question, answer) in [
+        (
+            "jev-latest",
+            r#"{"type":"choice","instructions":null,"criteria":{"only":null}}"#,
+            r#"{"type":"choice","choice":"only","probabilities":{"only":1.0},"confidence":1.0}"#,
+        ),
+        (
+            "jev-1.13.0",
+            r#"{"type":"score","criteria":["only"]}"#,
+            r#"{"type":"score","score":0.0,"legend":{"0":"only"},"probabilities":{"0":1.0},"confidence":1.0}"#,
+        ),
+        (
+            "jev-latest",
+            r#"{"type":"noul","criteria":{"true":null,"note":3}}"#,
+            r#"{"type":"noul","noul":0.9}"#,
+        ),
+    ] {
         let config_home = TempDir::new("cli-jev-config");
         let listener = TcpListener::bind("127.0.0.1:0").expect("local TypeSafe stand-in");
         let config_dir = config_home.path().join("s1gate");
@@ -453,13 +469,13 @@ fn infer_routes_jev_aliases_and_versions_to_typesafe() {
                     }
                 }
             }
-            let response = r#"{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":1}}"#;
+            let response = format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"q":{answer}}},"usage":{{"input_tokens":1,"output_tokens":1}}}}"#
+            );
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).expect("stand-in response");
             String::from_utf8(request).expect("UTF-8 request")
         });
-        let call = format!(
-            r#"{{"model":"{model}","state":"x","questions":{{"q":{{"type":"noul","instructions":"risky?"}}}}}}"#
-        );
+        let call = format!(r#"{{"model":"{model}","state":"x","questions":{{"q":{question}}}}}"#);
         let mut child = Command::new(binary())
             .arg("infer")
             .env("XDG_CONFIG_HOME", config_home.path())
@@ -492,6 +508,7 @@ fn infer_routes_jev_aliases_and_versions_to_typesafe() {
             request.contains(&format!("\"model\":\"{model}\"")),
             "{request}"
         );
+        assert!(request.contains(question), "{request}");
         let result: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("response JSON");
         assert_eq!(result["model"], "jev-1.13.0");
@@ -584,6 +601,28 @@ fn infer_accepts_one_optional_noul_clarification() {
         "{}",
         run.stderr
     );
+}
+
+#[test]
+fn infer_accepts_nullable_and_missing_instructions_for_local_questions() {
+    let run = run_infer_with_laya_model_identifier(
+        r#"{"state":"x","questions":{"route":{"type":"choice","instructions":null,"criteria":{"a":null,"b":null}},"urgency":{"type":"score","criteria":["low","high"]},"risk":{"type":"noul","criteria":{"true":null}}}}"#,
+    );
+
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("Checkpoint `convaiinnovations/laya`"));
+}
+
+#[test]
+fn infer_rejects_no_local_score_levels_before_inference() {
+    let run = run_infer_with_laya_model_identifier(
+        r#"{"state":"x","questions":{"urgency":{"type":"score","criteria":[]}}}"#,
+    );
+
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("at least one Level"), "{}", run.stderr);
 }
 
 #[test]
@@ -774,7 +813,7 @@ fn infer_enforces_typesafe_criteria_forms_and_limits() {
         ),
         (
             "score minimum levels",
-            serde_json::json!({"type":"score","instructions":"x","criteria":["only one"]}),
+            serde_json::json!({"type":"score","instructions":"x","criteria":[]}),
         ),
         (
             "score level limit",
@@ -782,7 +821,7 @@ fn infer_enforces_typesafe_criteria_forms_and_limits() {
         ),
         (
             "noul description type",
-            serde_json::json!({"type":"noul","instructions":"x","criteria":{"true":null}}),
+            serde_json::json!({"type":"noul","instructions":"x","criteria":{"true":3}}),
         ),
     ];
     for (case, question) in cases {

@@ -91,7 +91,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("the infer request");
             let request = read_http_request(&mut stream);
-            let response = r#"{"model":"jev-1.13.0","answers":{"route":{"type":"choice","choice":"z","probabilities":{"z":1.0,"a":0.0},"confidence":1.0},"urgency":{"type":"score","score":1.0,"legend":{"0":"low","1":"high"},"probabilities":{"0":0.0,"1":1.0},"confidence":1.0},"risk":{"type":"noul","noul":0.95}},"usage":{"input_tokens":12,"output_tokens":3}}"#;
+            let response = r#"{"model":"jev-1.13.0","answers":{"route":{"type":"choice","choice":"z","probabilities":{"z":1.0},"confidence":1.0},"urgency":{"type":"score","score":0.0,"legend":{"0":"low"},"probabilities":{"0":1.0},"confidence":1.0},"risk":{"type":"noul","noul":0.95}},"usage":{"input_tokens":12,"output_tokens":3}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -102,7 +102,7 @@ mod tests {
             request
         });
 
-        let call = r#"{"model":"jev-latest","state":{"message":"evidence","meta":[1,true]},"questions":{"route":{"type":"choice","instructions":{"prompt":"where?"},"criteria":{"z":{"desc":"last"},"a":null}},"urgency":{"type":"score","instructions":["how urgent?"],"criteria":["low",{"level":"high"}]},"risk":{"type":"noul","instructions":"is it risky?","criteria":{"true":{"reason":"yes"}}}}}"#;
+        let call = r#"{"model":"jev-latest","state":{"message":"evidence","meta":[1,true]},"questions":{"route":{"type":"choice","instructions":null,"criteria":{"z":{"desc":"last"}}},"urgency":{"type":"score","criteria":["low"]},"risk":{"type":"noul","criteria":{"true":null}}}}"#;
         let mut stdout = Vec::new();
         run_with_endpoint(Cursor::new(call), &mut stdout, &endpoint, Some("test-key"))
             .expect("Jev inference succeeds without a local Model Store");
@@ -126,11 +126,6 @@ mod tests {
         let request_json: Value = serde_json::from_str(request_body).expect("JSON request");
         let input_json: Value = serde_json::from_str(call).expect("JSON call");
         assert_eq!(request_json, input_json);
-        assert!(
-            request_body.find("\"z\"").expect("z Option")
-                < request_body.find("\"a\"").expect("a Option"),
-            "the caller's Criteria order is retained"
-        );
         assert_eq!(
             request_json["questions"]["route"]["criteria"]["z"]["desc"],
             "last"

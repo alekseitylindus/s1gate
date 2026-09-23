@@ -11,7 +11,6 @@ use crate::error::{Error, Result};
 
 /// One System One Call: evidence plus the Questions to judge against it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Call {
     /// The Model Identifier for the Backend that judges the Questions in this call.
     pub model: String,
@@ -27,8 +26,8 @@ impl Call {
     /// # Errors
     ///
     /// The input is not UTF-8, is not exactly one JSON System One Call, carries trailing input,
-    /// holds no Questions, names a Question with an unusable or repeated id, or defines Criteria of
-    /// the wrong shape, with fewer than two names, or with repeated names.
+    /// holds no Questions, or defines Criteria of the wrong shape. The local Backend also requires
+    /// answer spaces it can judge and names it can use in a prompt.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let json = std::str::from_utf8(bytes)
             .map_err(|error| Error::invalid_call(format!("the input is not UTF-8: {error}")))?;
@@ -52,14 +51,15 @@ impl Call {
         if self.questions.is_empty() {
             return Err(Error::invalid_call("at least one Question is required"));
         }
+        let local = !self.model.starts_with("jev-");
         for (id, question) in self.questions.iter() {
-            if !name_is_usable(id) {
+            if local && !name_is_usable(id) {
                 return Err(Error::invalid_call(format!(
                     "Question id {} must be non-empty and contain no control characters",
                     Name(id)
                 )));
             }
-            question.validate(id)?;
+            question.validate(id, local)?;
         }
         Ok(())
     }
@@ -119,20 +119,20 @@ impl<'de> Deserialize<'de> for Questions {
 
 /// One Question and its answer-space definition.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Question {
     /// The kind of Answer this Question expects.
     #[serde(rename = "type")]
     pub kind: QuestionType,
-    /// What the Question asks, rendered into its prompt.
+    /// What the Question asks, rendered into its prompt; TypeSafe permits omitting it.
+    #[serde(default)]
     pub instructions: Value,
     /// The answer space the Question defines; a `noul` Question may leave it out.
     pub criteria: Option<Criteria>,
 }
 
 impl Question {
-    fn validate(&self, id: &str) -> Result<()> {
-        if !is_typesafe_value(&self.instructions) {
+    fn validate(&self, id: &str, local: bool) -> Result<()> {
+        if !self.instructions.is_null() && !is_typesafe_value(&self.instructions) {
             return Err(Error::invalid_call(format!(
                 "Question `{id}` instructions must be a string, object, or array"
             )));
@@ -140,7 +140,7 @@ impl Question {
         match self.kind {
             QuestionType::Choice => match self.criteria.as_ref() {
                 Some(Criteria::Object(options)) => {
-                    if options.len() > 255 {
+                    if local && options.len() > 255 {
                         return Err(Error::invalid_call(format!(
                             "Question `{id}` choice Criteria may contain at most 255 Options"
                         )));
@@ -153,24 +153,29 @@ impl Question {
                             "Question `{id}` choice descriptions must be strings, objects, arrays, or null"
                         )));
                     }
-                    let names: Vec<&str> = options.iter().map(|(name, _)| name.as_str()).collect();
-                    validate_names(id, self.kind, "Option", &names)
+                    if local {
+                        let names: Vec<&str> =
+                            options.iter().map(|(name, _)| name.as_str()).collect();
+                        validate_names(id, self.kind, "Option", &names)
+                    } else {
+                        Ok(())
+                    }
                 }
                 Some(Criteria::List(_)) => Err(Error::invalid_call(format!(
                     "Question `{id}` choice Criteria must be an object of Options"
                 ))),
                 None => Err(Error::invalid_call(format!(
-                    "Question `{id}` choice requires Criteria with at least two Options"
+                    "Question `{id}` choice requires Criteria with at least one Option"
                 ))),
             },
             QuestionType::Score => match self.criteria.as_ref() {
                 Some(Criteria::List(values)) => {
-                    if values.len() < 2 {
+                    if values.is_empty() {
                         return Err(Error::invalid_call(format!(
-                            "Question `{id}` score Criteria must contain at least two Levels"
+                            "Question `{id}` score Criteria must contain at least one Level"
                         )));
                     }
-                    if values.len() > 10 {
+                    if local && values.len() > 10 {
                         return Err(Error::invalid_call(format!(
                             "Question `{id}` score Criteria may contain at most 10 Levels"
                         )));
@@ -186,7 +191,7 @@ impl Question {
                     "Question `{id}` score Criteria must be an array of Levels"
                 ))),
                 None => Err(Error::invalid_call(format!(
-                    "Question `{id}` score requires Criteria with at least two Levels"
+                    "Question `{id}` score requires Criteria with at least one Level"
                 ))),
             },
             QuestionType::Noul => match self.criteria.as_ref() {
@@ -194,12 +199,15 @@ impl Question {
                 Some(Criteria::Object(options)) => {
                     let mut names = BTreeSet::new();
                     for (name, value) in options {
-                        if !matches!(name.as_str(), "false" | "true") {
+                        if local && !matches!(name.as_str(), "false" | "true") {
                             return Err(Error::invalid_call(format!(
                                 "Question `{id}` noul Criteria may contain only `false` and `true`"
                             )));
                         }
-                        if !is_typesafe_value(value) {
+                        if matches!(name.as_str(), "false" | "true")
+                            && !value.is_null()
+                            && !is_typesafe_value(value)
+                        {
                             return Err(Error::invalid_call(format!(
                                 "Question `{id}` noul descriptions must be strings, objects, or arrays"
                             )));
@@ -313,12 +321,12 @@ fn name_is_usable(name: &str) -> bool {
     !name.trim().is_empty() && !name.chars().any(char::is_control)
 }
 
-/// The Options or Levels a Question's Criteria defines, named `noun` in diagnostics: at least two,
+/// The Options or Levels a Question's Criteria defines, named `noun`: at least one,
 /// each a usable name, and none repeated.
 fn validate_names(id: &str, kind: QuestionType, noun: &str, names: &[&str]) -> Result<()> {
-    if names.len() < 2 {
+    if names.is_empty() {
         return Err(Error::invalid_call(format!(
-            "Question `{id}` {kind} Criteria must contain at least two {noun}s"
+            "Question `{id}` {kind} Criteria must contain at least one {noun}"
         )));
     }
     let mut seen = BTreeSet::new();
