@@ -12,6 +12,7 @@ pub mod error;
 pub mod model_source;
 pub mod provenance;
 pub mod pull;
+pub mod router;
 pub mod store;
 
 pub use error::{Error, Result};

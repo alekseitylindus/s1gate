@@ -5,6 +5,7 @@ mod support;
 
 use std::fs;
 use std::io::Write;
+use std::net::TcpListener;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -396,6 +397,145 @@ fn infer_rejects_an_uncurated_model_source_before_locating_the_store() {
         stderr.contains("unsupported Model Identifier `some/other-model`"),
         "{stderr}"
     );
+}
+
+#[test]
+fn infer_routes_jev_aliases_and_versions_to_typesafe() {
+    for model in ["jev-latest", "jev-1.13.0"] {
+        let config_home = TempDir::new("cli-jev-config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("local TypeSafe stand-in");
+        let config_dir = config_home.path().join("s1gate");
+        fs::create_dir_all(&config_dir).expect("config directory");
+        fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "[typesafe]\napi_key = \"test-key\"\nendpoint = \"http://{}/v1/systemone\"\n",
+                listener.local_addr().expect("stand-in address")
+            ),
+        )
+        .expect("TypeSafe config");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "no TypeSafe request");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept TypeSafe request: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let size = std::io::Read::read(&mut stream, &mut buffer).expect("request bytes");
+                assert!(size > 0, "request closed before its body");
+                request.extend_from_slice(&buffer[..size]);
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                        .expect("Content-Length");
+                    if request.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = r#"{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":1}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).expect("stand-in response");
+            String::from_utf8(request).expect("UTF-8 request")
+        });
+        let call = format!(
+            r#"{{"model":"{model}","state":"x","questions":{{"q":{{"type":"noul","instructions":"risky?"}}}}}}"#
+        );
+        let mut child = Command::new(binary())
+            .arg("infer")
+            .env("XDG_CONFIG_HOME", config_home.path())
+            .env("XDG_DATA_HOME", config_home.path())
+            .env_remove("TYPESAFE_API_KEY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("s1gate runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(call.as_bytes())
+            .expect("write call");
+        let output = child.wait_with_output().expect("infer exits");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request = server.join().expect("stand-in server");
+        assert!(
+            request.starts_with("POST /v1/systemone HTTP/1.1"),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!("\"model\":\"{model}\"")),
+            "{request}"
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("response JSON");
+        assert_eq!(result["model"], "jev-1.13.0");
+    }
+}
+
+#[test]
+fn infer_rejects_an_unknown_identifier_without_a_typesafe_request() {
+    let config_home = TempDir::new("cli-unknown-config");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("local TypeSafe stand-in");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let config_dir = config_home.path().join("s1gate");
+    fs::create_dir_all(&config_dir).expect("config directory");
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[typesafe]\napi_key = \"test-key\"\nendpoint = \"http://{}/v1/systemone\"\n",
+            listener.local_addr().expect("stand-in address")
+        ),
+    )
+    .expect("TypeSafe config");
+    let mut child = Command::new(binary())
+        .arg("infer")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("XDG_DATA_HOME", config_home.path())
+        .env_remove("TYPESAFE_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("s1gate runs");
+    child.stdin.take().expect("stdin").write_all(
+        br#"{"model":"other-preview","state":"x","questions":{"q":{"type":"noul","instructions":"risky?"}}}"#,
+    ).expect("write call");
+    let output = child.wait_with_output().expect("infer exits");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unsupported Model Identifier `other-preview`")
+    );
+    assert!(listener.accept().is_err(), "no TypeSafe request was made");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The remote `TypeSafe` Backend selected by `jev-latest`.
+//! The remote `TypeSafe` Backend selected by `jev-*` Model Identifiers.
 
 use std::io::Read;
 use std::thread;

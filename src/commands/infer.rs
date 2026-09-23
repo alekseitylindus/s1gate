@@ -1,23 +1,15 @@
 //! The `infer` command: judge one System One Call against a local or remote Backend.
 
-use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
 
-use crate::call::Call;
 use crate::error::{Error, Result};
-use crate::laya;
-use crate::model_source;
-use crate::store::Store;
+use crate::router::ModelRouter;
 
 pub fn run() -> Result<()> {
-    run_with_settings(
+    run_with_router(
         io::stdin().lock(),
         io::stdout().lock(),
-        crate::typesafe::ENDPOINT,
-        std::env::var_os("TYPESAFE_API_KEY"),
-        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        std::env::var_os("HOME").map(PathBuf::from),
+        &ModelRouter::from_env(),
     )
 }
 
@@ -32,40 +24,32 @@ fn run_with_endpoint(
         input,
         stdout,
         endpoint,
-        api_key.map(OsString::from),
+        api_key.map(std::ffi::OsString::from),
         None,
         None,
     )
 }
 
+#[cfg(test)]
 fn run_with_settings(
+    input: impl Read,
+    stdout: impl Write,
+    endpoint: &str,
+    env_api_key: Option<std::ffi::OsString>,
+    xdg_config_home: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let router = ModelRouter::with_settings(endpoint, env_api_key, xdg_config_home, home);
+    run_with_router(input, stdout, &router)
+}
+
+fn run_with_router(
     mut input: impl Read,
     mut stdout: impl Write,
-    endpoint: &str,
-    env_api_key: Option<OsString>,
-    xdg_config_home: Option<PathBuf>,
-    home: Option<PathBuf>,
+    router: &ModelRouter,
 ) -> Result<()> {
-    let (call, body) = read_call(&mut input)?;
-    let result = if call.model == "jev-latest" {
-        let settings = typesafe_settings(
-            env_api_key,
-            xdg_config_home.as_deref(),
-            home.as_deref(),
-            endpoint,
-        )?;
-        crate::typesafe::run_at(&call, &body, Some(&settings.api_key), &settings.endpoint)?
-    } else {
-        let source = model_source::lookup_identifier(&call.model)?;
-        let name = source.repo;
-        let store = Store::from_env()?;
-        if store.provenance(name)?.is_none() {
-            return Err(Error::MissingCheckpoint {
-                name: name.to_string(),
-            });
-        }
-        laya::run(&store, source, &call)?
-    };
+    let body = read_call(&mut input)?;
+    let result = router.route(&body)?;
     serde_json::to_writer(&mut stdout, &result).map_err(|error| Error::Inference {
         message: format!("writing result: {error}"),
     })?;
@@ -75,120 +59,13 @@ fn run_with_settings(
     Ok(())
 }
 
-struct TypeSafeSettings {
-    api_key: String,
-    endpoint: String,
-}
-
-fn typesafe_settings(
-    env_api_key: Option<OsString>,
-    xdg_config_home: Option<&Path>,
-    home: Option<&Path>,
-    default_endpoint: &str,
-) -> Result<TypeSafeSettings> {
-    let env_api_key = env_api_key
-        .map(|key| {
-            let key = key.to_str().ok_or_else(|| Error::TypeSafe {
-                status: None,
-                message: "TYPESAFE_API_KEY is not valid Unicode".to_string(),
-            })?;
-            if key.trim().is_empty() {
-                return Err(Error::TypeSafe {
-                    status: None,
-                    message: "TYPESAFE_API_KEY is empty; set it to a non-empty key".to_string(),
-                });
-            }
-            Ok(key.to_string())
-        })
-        .transpose()?;
-
-    let config_path = xdg_config_home
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .or_else(|| home.map(|path| path.join(".config")))
-        .map(|config_home| config_home.join("s1gate/config.toml"));
-    let config = if let Some(path) = config_path {
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
-                Ok(config) => Some((path, config)),
-                Err(_) if env_api_key.is_some() => None,
-                Err(_) => {
-                    return Err(Error::TypeSafe {
-                        status: None,
-                        message: format!(
-                            "{} is not valid TOML; fix it or set TYPESAFE_API_KEY",
-                            path.display()
-                        ),
-                    });
-                }
-            },
-            Err(_) if env_api_key.is_some() => None,
-            Err(error) => {
-                return Err(Error::TypeSafe {
-                    status: None,
-                    message: format!(
-                        "cannot read {} ({error}); set TYPESAFE_API_KEY or add typesafe.api_key to this file",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    } else {
-        None
-    };
-
-    let configured_api_key = config.as_ref().and_then(|(_, config)| {
-        config
-            .get("typesafe")
-            .and_then(|typesafe| typesafe.get("api_key"))
-            .and_then(toml::Value::as_str)
-            .filter(|key| !key.trim().is_empty())
-            .map(str::to_string)
-    });
-    let api_key = env_api_key.or(configured_api_key).ok_or_else(|| Error::TypeSafe {
-        status: None,
-        message: config.as_ref().map_or_else(
-            || "cannot locate configuration; set TYPESAFE_API_KEY or HOME".to_string(),
-            |(path, _)| format!(
-                "{} must contain a non-empty string at typesafe.api_key; set TYPESAFE_API_KEY or fix the file",
-                path.display()
-            ),
-        ),
-    })?;
-
-    let endpoint = if let Some((path, config)) = &config {
-        match config
-            .get("typesafe")
-            .and_then(|typesafe| typesafe.get("endpoint"))
-        {
-            None => default_endpoint.to_string(),
-            Some(toml::Value::String(endpoint)) if !endpoint.trim().is_empty() => endpoint.clone(),
-            Some(_) => {
-                return Err(Error::TypeSafe {
-                    status: None,
-                    message: format!(
-                        "{} must contain a non-empty string at typesafe.endpoint",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    } else {
-        default_endpoint.to_string()
-    };
-
-    Ok(TypeSafeSettings { api_key, endpoint })
-}
-
-/// Read the System One Call from stdin, the only place `infer` takes input: a reader that fails is
-/// this command's failure, while bytes that are not a Call are the caller's.
-fn read_call(input: &mut impl Read) -> Result<(Call, Vec<u8>)> {
+/// Read the System One Call from stdin. A read failure is this command's failure.
+fn read_call(input: &mut impl Read) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     input
         .read_to_end(&mut bytes)
         .map_err(|error| Error::io("read", "<stdin>", error))?;
-    let call = Call::from_bytes(&bytes)?;
-    Ok((call, bytes))
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -453,7 +330,7 @@ mod tests {
         let mut stdout = Vec::new();
 
         let error = run_with_endpoint(
-            Cursor::new(r#"{"model":"jev-preview","state":"x","questions":{"risk":{"type":"noul","instructions":"risky?"}}}"#),
+            Cursor::new(r#"{"model":"other-preview","state":"x","questions":{"risk":{"type":"noul","instructions":"risky?"}}}"#),
             &mut stdout,
             &endpoint,
             Some("test-key"),
@@ -461,7 +338,7 @@ mod tests {
         .expect_err("unsupported model identifiers stay rejected");
 
         assert_eq!(error.exit_code(), 2);
-        assert!(error.to_string().contains("jev-preview"));
+        assert!(error.to_string().contains("other-preview"));
         assert!(stdout.is_empty());
         assert!(listener.accept().is_err(), "no remote request was made");
     }
