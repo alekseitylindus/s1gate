@@ -47,6 +47,14 @@ Every file is streamed to `*.part` and renamed into place only after its size an
 checksum check out, and the Provenance record is written last, so an interrupted Pull leaves the
 Checkpoint as it was.
 
+### `s1gate models`
+
+List the Model Identifiers currently available to `infer`, one per line. A local Model Source is
+listed when its completed Pull record and every required file are present. `jev-latest` is listed
+when a non-empty TypeSafe API key is configured through `TYPESAFE_API_KEY` or
+`typesafe.api_key` in the configuration file. The command makes no network request. It prints an
+empty list when no Model Identifier is available.
+
 ### `s1gate verify`
 
 Verify stored Checkpoints against their Provenance, offline. With `--name` it verifies one Model

@@ -7,6 +7,7 @@ use crate::model_source::{self, ModelSource};
 use crate::store::Store;
 
 pub mod infer;
+pub mod models;
 pub mod pull;
 pub mod verify;
 

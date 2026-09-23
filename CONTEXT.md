@@ -44,10 +44,20 @@ The implementation that judges Questions in a System One Call, either against a 
 through a remote model API. Laya is local; Jev is remote.
 _Avoid_: engine, runtime, driver, model type
 
+**Model Router**:
+The component that resolves a System One Call's Model Identifier to the Backend that judges it.
+_Avoid_: HTTP router, endpoint handler
+
 **Model Identifier**:
 The caller-chosen value of `model` in a System One Call, naming the model that judges its
 Questions. `convaiinnovations/laya` names Laya's Model Source; `jev-latest` names a remote model alias.
 _Avoid_: Model Source when the identifier does not name a local source
+
+**Available Model Identifier**:
+A Model Identifier whose local Checkpoint has a completed Pull record and all required files, or
+whose remote Backend has a non-empty configured API key. Availability does not guarantee that
+inference will succeed.
+_Avoid_: installed model, verified model
 
 **Resolved Model Identifier**:
 The versioned `model` value a remote Backend returns after judging a call made with a model alias.

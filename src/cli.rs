@@ -29,6 +29,8 @@ enum Command {
     Infer,
     /// Verify stored Checkpoints against their Provenance without network access
     Verify(commands::verify::Args),
+    /// List Model Identifiers currently available to infer
+    Models,
 }
 
 /// Parse the command line, run the command, and report what it did. Exit codes are the caller's:
@@ -43,5 +45,6 @@ pub fn run() -> Result<()> {
         Command::Pull(args) => commands::pull::run(args),
         Command::Infer => commands::infer::run(),
         Command::Verify(args) => commands::verify::run(args),
+        Command::Models => commands::models::run(),
     }
 }
