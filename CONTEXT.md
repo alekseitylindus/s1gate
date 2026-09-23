@@ -103,6 +103,12 @@ _Avoid_: slot, mask position, logit index
 A Backend's result for one Question.
 _Avoid_: result, prediction, response, output
 
+**Refusal**:
+A remote Backend's non-success answer to a System One Call: the status, error body, and retry delay
+it returned. An HTTP client receives it unchanged; the CLI prints an abbreviated, credential-free
+diagnostic instead.
+_Avoid_: error, failure (unqualified — s1gate's own failures are not Refusals)
+
 **Calibration Temperature**:
 The scaling applied to a Question's Markers before they become an Answer, selected per Question Type
 and option count. Fitted outside s1gate; never learned at judgement time.

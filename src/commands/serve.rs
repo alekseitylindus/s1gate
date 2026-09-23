@@ -2,13 +2,15 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use clap::Args as ClapArgs;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::router::ModelRouter;
+use crate::router::{Judged, ModelRouter, Refusal};
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
@@ -24,7 +26,7 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let router = ModelRouter::for_server()?;
+    let router = Arc::new(ModelRouter::for_server()?);
     let listener =
         TcpListener::bind((args.host.as_str(), args.port)).map_err(|error| Error::Inference {
             message: format!("binding {}:{}: {error}", args.host, args.port),
@@ -44,7 +46,15 @@ pub fn run(args: Args) -> Result<()> {
             .map_err(|error| Error::Inference {
                 message: format!("setting HTTP read timeout: {error}"),
             })?;
-        if let Err(error) = serve_connection(&mut stream, &router) {
+        // One thread per connection: a remote Call waits for nothing but its own Backend, and local
+        // Calls contend only with each other, for the loaded Checkpoint they share.
+        let router = Arc::clone(&router);
+        let serving = thread::Builder::new().spawn(move || {
+            if let Err(error) = serve_connection(&mut stream, &router) {
+                eprintln!("s1gate: HTTP connection: {error}");
+            }
+        });
+        if let Err(error) = serving {
             eprintln!("s1gate: HTTP connection: {error}");
         }
     }
@@ -52,46 +62,108 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 fn serve_connection(stream: &mut TcpStream, router: &ModelRouter) -> std::io::Result<()> {
-    let request = read_request(stream);
-    let (status, body) = match request {
+    let response = match read_request(stream) {
         Ok((method, path, _)) if method == "GET" && path == "/v1/models" => {
-            (200, router.loaded_local_models())
+            Response::json(200, router.loaded_local_models())
         }
         Ok((method, path, body)) if method == "POST" && path == "/v1/systemone" => {
-            match router.route(&body) {
-                Ok(value) => (200, value),
-                Err(error) if error.exit_code() == 2 => (422, detail(&error.to_string())),
-                Err(Error::MissingCheckpoint { name }) => (
-                    503,
-                    detail(&format!(
-                        "missing Checkpoint `{name}`; run s1gate pull {name}"
-                    )),
-                ),
-                Err(error) => (500, detail(&error.to_string())),
-            }
+            judge_call(router, &body)
         }
         Ok((_, path, _)) if path != "/v1/systemone" && path != "/v1/models" => {
-            (404, detail("not found"))
+            Response::error(404, "not found")
         }
-        Ok(_) => (405, detail("method not allowed")),
-        Err(message) => (400, detail(&message)),
+        Ok(_) => Response::error(405, "method not allowed"),
+        Err(message) => Response::error(400, &message),
     };
-    let body = serde_json::to_vec(&body).expect("JSON Value serializes");
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        422 => "Unprocessable Entity",
-        503 => "Service Unavailable",
-        _ => "Internal Server Error",
-    };
+    write_response(stream, &response)
+}
+
+/// The answer to one System One Call: the Backend's response, or what stopped it.
+fn judge_call(router: &ModelRouter, body: &[u8]) -> Response {
+    match router.judge(body) {
+        Ok(Judged::Answer(answer)) => Response::json(200, answer),
+        Ok(Judged::Refusal(refusal)) => Response::forward(refusal),
+        Err(error) if error.exit_code() == 2 => Response::error(422, &error.to_string()),
+        Err(Error::MissingCheckpoint { name }) => Response::error(
+            503,
+            &format!("missing Checkpoint `{name}`; run s1gate pull {name}"),
+        ),
+        // The remote Backend never answered with a response of its own to forward.
+        Err(error @ Error::TypeSafe { .. }) => Response::error(502, &error.to_string()),
+        Err(error) => Response::error(500, &error.to_string()),
+    }
+}
+
+/// One response the server writes back.
+struct Response {
+    status: u16,
+    /// The remote Backend's own `Retry-After`, when it sent one.
+    retry_after: Option<String>,
+    body: Vec<u8>,
+}
+
+impl Response {
+    /// This server's own answer, as a `TypeSafe`-shaped `detail` body.
+    fn error(status: u16, message: &str) -> Self {
+        Self::json(status, detail(message))
+    }
+
+    fn json(status: u16, value: Value) -> Self {
+        Self {
+            status,
+            retry_after: None,
+            body: serde_json::to_vec(&value).expect("JSON Value serializes"),
+        }
+    }
+
+    /// The remote Backend's answer: its status, its body, and its retry delay as it sent them.
+    fn forward(refusal: Refusal) -> Self {
+        Self {
+            status: refusal.status,
+            // A header cannot carry a line break, whatever the remote Backend writes.
+            retry_after: refusal
+                .retry_after
+                .filter(|value| !value.chars().any(char::is_control)),
+            body: refusal.body,
+        }
+    }
+}
+
+fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Result<()> {
+    let retry_after = response
+        .retry_after
+        .as_ref()
+        .map_or(String::new(), |value| format!("Retry-After: {value}\r\n"));
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{retry_after}Connection: close\r\n\r\n",
+        response.status,
+        reason(response.status),
+        response.body.len()
     )?;
-    stream.write_all(&body)
+    stream.write_all(&response.body)
+}
+
+/// The reason phrase of `status`, which a client may ignore either way.
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        529 => "Site is Overloaded",
+        _ => "Unknown",
+    }
 }
 
 fn detail(message: &str) -> Value {

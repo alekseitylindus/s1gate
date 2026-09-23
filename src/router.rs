@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -10,6 +11,29 @@ use crate::error::{Error, Result};
 use crate::laya::Loaded;
 use crate::model_source;
 use crate::store::Store;
+
+/// What the Model Router resolved one System One Call to.
+pub enum Judged {
+    /// The selected Backend judged the call, and this is the response.
+    Answer(Value),
+    /// The remote Backend refused the call, in `TypeSafe`'s own terms.
+    Refusal(Refusal),
+}
+
+/// The remote Backend's final refusal of a System One Call, as `TypeSafe` answered it.
+///
+/// An HTTP client receives the status, body, and retry delay unchanged. The CLI prints `message`
+/// instead: a short diagnostic that carries neither the credential nor request data.
+pub struct Refusal {
+    /// The HTTP status `TypeSafe` answered with.
+    pub status: u16,
+    /// The body `TypeSafe` answered with, as it wrote it.
+    pub body: Vec<u8>,
+    /// The `Retry-After` header of that answer, when it carried one.
+    pub retry_after: Option<String>,
+    /// A short diagnostic without request data or credentials.
+    pub message: String,
+}
 
 /// Routes validated System One Calls without reading or writing a transport stream.
 pub struct ModelRouter {
@@ -21,8 +45,11 @@ pub struct ModelRouter {
 }
 
 enum Local {
+    /// Select the local Backend from the Model Store for each Call.
     FromStore,
-    Loaded(Option<Loaded>),
+    /// The local Backend the server loaded at startup, judged one Call at a time. `None` when no
+    /// Checkpoint was present, so no local Model Identifier is served.
+    Loaded(Option<Mutex<Loaded>>),
 }
 
 impl ModelRouter {
@@ -54,7 +81,7 @@ impl ModelRouter {
     pub(crate) fn for_server() -> Result<Self> {
         let store = Store::from_env()?;
         let local = if store.provenance(model_source::LAYA.repo)?.is_some() {
-            Some(Loaded::load(&store, &model_source::LAYA)?)
+            Some(Mutex::new(Loaded::load(&store, &model_source::LAYA)?))
         } else {
             None
         };
@@ -78,13 +105,17 @@ impl ModelRouter {
         }
     }
 
-    /// Parse and judge one JSON System One Call, returning its response without transport I/O.
+    /// Parse and judge one JSON System One Call.
+    ///
+    /// The remote Backend's own answer is kept as it stands, so every transport reports a refusal
+    /// in its own terms instead of through a shared error.
     ///
     /// # Errors
     ///
     /// Returns a usage error for invalid calls or unsupported identifiers, and a runtime error
-    /// when the selected Backend cannot judge the call.
-    pub fn route(&self, body: &[u8]) -> Result<Value> {
+    /// when the selected Backend cannot judge the call at all. A remote Backend's refusal is not
+    /// an error here: it is `Judged::Refusal`.
+    pub fn judge(&self, body: &[u8]) -> Result<Judged> {
         let call = Call::from_bytes(body)?;
         if call.model.starts_with("jev-") {
             let settings = typesafe_settings(
@@ -109,9 +140,14 @@ impl ModelRouter {
                         name: source.repo.to_string(),
                     });
                 }
-                crate::laya::run(&store, source, &call)
+                crate::laya::run(&store, source, &call).map(Judged::Answer)
             }
-            Local::Loaded(Some(local)) => local.run(&call),
+            // One Call at a time: a Call that panicked must not stop every later local Call.
+            Local::Loaded(Some(loaded)) => loaded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .run(&call)
+                .map(Judged::Answer),
             Local::Loaded(None) => Err(Error::MissingCheckpoint {
                 name: source.repo.to_string(),
             }),

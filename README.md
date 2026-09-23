@@ -181,7 +181,18 @@ Invalid Calls receive HTTP 422 with a `detail` array.
 At startup, the server loads each present local Checkpoint and stops if one is invalid. It skips
 absent Checkpoints. Local Calls run sequentially against the loaded Checkpoint until restart, so
 changes to the Model Store take effect after a restart. The server never Pulls a Checkpoint.
-Incoming Authorization is optional; Jev Calls use the server's configured `TYPESAFE_API_KEY`.
+Incoming Authorization is optional; Jev Calls use the server's configured `TYPESAFE_API_KEY`, which
+no request header can replace.
+
+A Call whose Model Identifier is a `jev-*` value is forwarded to `TypeSafe`, whether it names an
+alias such as `jev-latest` or a version. The server answers with `TypeSafe`'s own result: a judged
+Call returns the resolved `model`, its named `answers`, and its `usage`, while a refusal keeps
+`TypeSafe`'s status, JSON body, and `Retry-After` header when it sent one. HTTP 429 and 529 answers
+are retried up to two times under the same policy `infer` applies (ADR-0015). Any other status is
+answered once, as it stands. A failure that leaves no answer of `TypeSafe`'s to forward — no
+configured key, no route to the API, or a 200 that is not one complete response — answers HTTP 502
+with a `detail` array. Remote Calls proceed concurrently, and a remote Call never waits for local
+inference (ADR-0015).
 
 `GET /v1/models` returns a TypeSafe-shaped `models` array describing the local Backends loaded at
 startup. Laya appears as `convaiinnovations/laya` with release date `2026-09-18` when its

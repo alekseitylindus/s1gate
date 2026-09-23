@@ -9,22 +9,24 @@ use ureq::Agent;
 
 use crate::call::Call;
 use crate::error::{Error, Result};
+use crate::router::{Judged, Refusal};
 
 pub(crate) const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const MAX_ATTEMPTS: usize = 3;
 
-/// Judge `call` through `TypeSafe` and return its validated response.
+/// Judge `call` through `TypeSafe` and return what it answered.
 ///
 /// # Errors
 ///
-/// Returns a `TypeSafe` runtime error for missing credentials, transport or service failures, and
-/// malformed responses. HTTP 422 is a usage error.
+/// Returns a `TypeSafe` runtime error when no usable credential is configured, when `TypeSafe`
+/// cannot be reached, and when it answers 200 with anything but one complete response. An answer
+/// that is not 200 comes back as a `Refusal` for the caller to report as its transport requires.
 pub(crate) fn run_at(
     call: &Call,
     body: &[u8],
     api_key: Option<&str>,
     endpoint: &str,
-) -> Result<Value> {
+) -> Result<Judged> {
     let api_key = api_key
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| Error::TypeSafe {
@@ -51,13 +53,12 @@ pub(crate) fn run_at(
                 message: "could not reach the TypeSafe API".to_string(),
             })?;
         let status = response.status().as_u16();
+        let retry_after = retry_after_header(&response);
         if (status == 429 || status == 529) && attempt + 1 < MAX_ATTEMPTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| retry_after_delay(value, SystemTime::now()));
-            let delay = retry_after.unwrap_or_else(|| Duration::from_millis(200 * (1 << attempt)));
+            let delay = retry_after
+                .as_deref()
+                .and_then(|value| retry_after_delay(value, SystemTime::now()))
+                .unwrap_or_else(|| Duration::from_millis(200 * (1 << attempt)));
             thread::sleep(delay);
             continue;
         }
@@ -78,20 +79,32 @@ pub(crate) fn run_at(
                 529 => "service remained overloaded after retries",
                 _ => "TypeSafe could not complete the request",
             };
-            return Err(Error::TypeSafe {
-                status: Some(status),
+            return Ok(Judged::Refusal(Refusal {
+                status,
                 message: api_error_message(&response_body, api_key, body)
                     .unwrap_or_else(|| fallback.to_string()),
-            });
+                retry_after,
+                body: response_body.into_bytes(),
+            }));
         }
         let response: Value =
             serde_json::from_str(&response_body).map_err(|_| Error::TypeSafe {
                 status: Some(status),
                 message: "TypeSafe returned invalid JSON".to_string(),
             })?;
-        return validate_response(call, response);
+        return validate_response(call, response).map(Judged::Answer);
     }
     unreachable!("the bounded retry loop always returns or continues to its last attempt")
+}
+
+/// The `Retry-After` header of `response`, as `TypeSafe` wrote it, for the retry policy to honor
+/// and an HTTP client to receive.
+fn retry_after_header(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {

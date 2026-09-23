@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 
 use crate::error::{Error, Result};
-use crate::router::ModelRouter;
+use crate::router::{Judged, ModelRouter};
 
 pub fn run() -> Result<()> {
     run_with_router(
@@ -49,7 +49,16 @@ fn run_with_router(
     router: &ModelRouter,
 ) -> Result<()> {
     let body = read_call(&mut input)?;
-    let result = router.route(&body)?;
+    let result = match router.judge(&body)? {
+        Judged::Answer(answer) => answer,
+        // A refusal is this command's failure, reported as its own short diagnostic.
+        Judged::Refusal(refusal) => {
+            return Err(Error::TypeSafe {
+                status: Some(refusal.status),
+                message: refusal.message,
+            });
+        }
+    };
     serde_json::to_writer(&mut stdout, &result).map_err(|error| Error::Inference {
         message: format!("writing result: {error}"),
     })?;
