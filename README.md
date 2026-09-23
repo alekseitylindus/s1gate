@@ -155,7 +155,9 @@ endpoint = "https://api.typesafe.ai/v1/systemone"
 
 Restrict this file to your user, for example with `chmod 600 ~/.config/s1gate/config.toml`. A set
 `TYPESAFE_API_KEY` takes precedence for that process. An empty environment value is an error and
-does not fall back to the file. `typesafe.endpoint` overrides the default Jev endpoint.
+does not fall back to the file. `typesafe.endpoint` overrides the default Jev endpoint; the model
+list is read from `models` on the same base, so a proxy reached through `typesafe.endpoint`
+answers `GET /v1/models` too.
 
 Jev HTTP 422 responses exit with code 2 because TypeSafe rejected the System One Call. Authentication,
 other HTTP, network, and malformed-response failures exit with code 1. Error output includes the HTTP
@@ -194,10 +196,18 @@ configured key, no route to the API, or a 200 that is not one complete response 
 with a `detail` array. Remote Calls proceed concurrently, and a remote Call never waits for local
 inference (ADR-0015).
 
-`GET /v1/models` returns a TypeSafe-shaped `models` array describing the local Backends loaded at
-startup. Laya appears as `convaiinnovations/laya` with release date `2026-09-18` when its
-Checkpoint was loaded. With no local Checkpoint, the array is empty. Discovery needs no `TypeSafe`
-key and makes no remote request.
+`GET /v1/models` returns a TypeSafe-shaped `models` array. It lists every local Backend loaded at
+startup, followed by the models `TypeSafe` currently serves when a key is configured. Laya appears
+as `convaiinnovations/laya` with release date `2026-09-18` when its Checkpoint was loaded; remote
+aliases appear with the description and release date `TypeSafe` publishes for them. The remote list
+comes from the model-list endpoint beside `typesafe.endpoint`, which defaults to
+`https://api.typesafe.ai/v1/models`.
+
+Without a key, the list holds the local models only and makes no remote request. A failed remote
+list is answered as `TypeSafe` answered it — its final status, its JSON body, and its `Retry-After`
+header when it sent one — rather than as a partial list, so a client never reads an incomplete list
+as the whole set. Versioned `jev-*` identifiers are accepted by `POST /v1/systemone` whether or not
+the list names them.
 
 ## Model Store
 

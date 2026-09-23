@@ -10,7 +10,7 @@ use clap::Args as ClapArgs;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::router::{Judged, ModelRouter, Refusal};
+use crate::router::{Judged, ModelRouter, Models, Refusal};
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
@@ -63,9 +63,7 @@ pub fn run(args: Args) -> Result<()> {
 
 fn serve_connection(stream: &mut TcpStream, router: &ModelRouter) -> std::io::Result<()> {
     let response = match read_request(stream) {
-        Ok((method, path, _)) if method == "GET" && path == "/v1/models" => {
-            Response::json(200, router.loaded_local_models())
-        }
+        Ok((method, path, _)) if method == "GET" && path == "/v1/models" => list_models(router),
         Ok((method, path, body)) if method == "POST" && path == "/v1/systemone" => {
             judge_call(router, &body)
         }
@@ -76,6 +74,16 @@ fn serve_connection(stream: &mut TcpStream, router: &ModelRouter) -> std::io::Re
         Err(message) => Response::error(400, &message),
     };
     write_response(stream, &response)
+}
+
+/// The list of Model Identifiers available to a System One Call, local and remote.
+fn list_models(router: &ModelRouter) -> Response {
+    match router.models() {
+        Ok(Models::List(models)) => Response::json(200, json!({"models": models})),
+        Ok(Models::Refusal(refusal)) => Response::forward(refusal),
+        // The remote Backend never answered with a model list of its own to forward.
+        Err(error) => Response::error(502, &error.to_string()),
+    }
 }
 
 /// The answer to one System One Call: the Backend's response, or what stopped it.

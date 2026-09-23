@@ -26,6 +26,10 @@ const JEV_MODEL: &str = "jev-1.13.0";
 /// What `TypeSafe` answers a judged Call with.
 const JEV_ANSWER: &str = r#"{"model":"jev-1.13.0","answers":{"risk":{"type":"noul","noul":0.75}},"usage":{"input_tokens":11,"output_tokens":2}}"#;
 
+/// What `TypeSafe` answers a model-list request with: the aliases it serves, each with the
+/// description and release date it publishes for it.
+const JEV_MODELS: &str = r#"{"models":[{"name":"jev-latest","description":"The most recent stable release.","release_date":"2025-11-04"},{"name":"jev-preview","description":"The most recent release, preview included.","release_date":"2026-01-15"}]}"#;
+
 struct Server {
     child: Child,
     port: u16,
@@ -72,6 +76,12 @@ impl Server {
     }
 
     fn get_models(&self) -> (u16, Value) {
+        let (status, _, body) = self.get_models_raw();
+        (status, serde_json::from_str(&body).expect("JSON response"))
+    }
+
+    /// One `GET /v1/models`: the status, the response headers, and the response body as answered.
+    fn get_models_raw(&self) -> (u16, String, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect to server");
         write!(
             stream,
@@ -83,7 +93,7 @@ impl Server {
         let (head, body) = response.split_once("\r\n\r\n").expect("HTTP response");
         assert!(head.contains("Content-Type: application/json"));
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        (status, serde_json::from_str(body).expect("JSON response"))
+        (status, head.to_string(), body.to_string())
     }
 }
 
@@ -201,6 +211,138 @@ fn loaded_laya_is_listed_after_its_checkpoint_is_removed() {
             .as_str()
             .is_some_and(|s| !s.is_empty())
     );
+}
+
+#[test]
+fn remote_models_are_merged_with_loaded_local_models() {
+    let stand_in = StandIn::start(Replies::InOrder(vec![
+        reply("200 OK", JEV_MODELS),
+        reply("200 OK", JEV_ANSWER),
+    ]));
+    let data_home = TempDir::new("serve-models-merged");
+    fixture::write_inferable(&data_home.path().join("s1gate/models"));
+    let server = remote_server(&data_home, &stand_in.endpoint());
+
+    let (status, body) = server.get_models();
+    assert_eq!(status, 200, "{body}");
+    let models = body["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 3, "{body}");
+    assert_eq!(models[0]["name"], "convaiinnovations/laya");
+    assert_eq!(models[1]["name"], "jev-latest");
+    assert_eq!(models[1]["description"], "The most recent stable release.");
+    assert_eq!(models[1]["release_date"], "2025-11-04");
+    assert_eq!(models[2]["name"], "jev-preview");
+    assert_eq!(models[2]["description"], "The most recent release, preview included.");
+    assert_eq!(models[2]["release_date"], "2026-01-15");
+
+    let request = stand_in.requests().pop().expect("the model list request");
+    let request = request.to_ascii_lowercase();
+    assert!(request.starts_with("get /v1/models http/1.1"), "{request}");
+    assert!(
+        request.contains("authorization: bearer configured-secret"),
+        "{request}"
+    );
+
+    // The list publishes aliases; a versioned identifier still judges a Call.
+    let versioned = JEV_CALL.replace("jev-latest", JEV_MODEL);
+    let (status, body) = server.post(&versioned, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["model"], JEV_MODEL);
+}
+
+#[test]
+fn remote_models_are_listed_by_a_server_without_a_local_checkpoint() {
+    let stand_in = StandIn::start(Replies::InOrder(vec![reply("200 OK", JEV_MODELS)]));
+    let data_home = TempDir::new("serve-models-remote-only");
+    let server = remote_server(&data_home, &stand_in.endpoint());
+
+    let (status, body) = server.get_models();
+    assert_eq!(status, 200, "{body}");
+    let models = body["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 2, "{body}");
+    assert_eq!(models[0]["name"], "jev-latest");
+    assert_eq!(models[1]["name"], "jev-preview");
+}
+
+#[test]
+fn a_missing_typesafe_key_lists_local_models_without_asking_typesafe() {
+    let stand_in = StandIn::start(Replies::InOrder(vec![reply("200 OK", JEV_MODELS)]));
+    let data_home = TempDir::new("serve-models-no-key");
+    fixture::write_inferable(&data_home.path().join("s1gate/models"));
+    configure_endpoint(&data_home, &stand_in.endpoint());
+    let server = Server::start(&data_home);
+
+    let (status, body) = server.get_models();
+    assert_eq!(status, 200, "{body}");
+    let models = body["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 1, "{body}");
+    assert_eq!(models[0]["name"], "convaiinnovations/laya");
+    assert_eq!(models[0]["release_date"], "2026-09-18");
+    assert!(
+        stand_in.requests().is_empty(),
+        "the local-only list asked TypeSafe"
+    );
+}
+
+#[test]
+fn a_remote_model_list_failure_is_forwarded_instead_of_a_partial_local_list() {
+    let refusal = r#"{"error":{"message":"bad key","code":"unauthorized"}}"#;
+    let stand_in = StandIn::start(Replies::InOrder(vec![reply("401 Unauthorized", refusal)]));
+    let data_home = TempDir::new("serve-models-failure");
+    fixture::write_inferable(&data_home.path().join("s1gate/models"));
+    let server = remote_server(&data_home, &stand_in.endpoint());
+
+    let (status, _, body) = server.get_models_raw();
+    assert_eq!(status, 401);
+    assert_eq!(
+        body, refusal,
+        "the remote body is forwarded as TypeSafe wrote it"
+    );
+    assert_eq!(stand_in.requests().len(), 1);
+}
+
+#[test]
+fn a_rate_limited_model_list_is_retried_and_its_last_retry_after_is_kept() {
+    let refusal = r#"{"error":{"message":"quota exhausted","code":"rate_limited"}}"#;
+    let stand_in = StandIn::start(Replies::InOrder(vec![
+        reply("429 Too Many Requests", refusal).retry("0"),
+        reply("429 Too Many Requests", refusal).retry("0"),
+        reply("429 Too Many Requests", refusal).retry("7"),
+    ]));
+    let data_home = TempDir::new("serve-models-retry");
+    let server = remote_server(&data_home, &stand_in.endpoint());
+
+    let (status, head, body) = server.get_models_raw();
+    assert_eq!(status, 429);
+    assert_eq!(body, refusal);
+    assert!(
+        head.to_ascii_lowercase().contains("retry-after: 7"),
+        "{head}"
+    );
+    assert_eq!(
+        stand_in.requests().len(),
+        3,
+        "two retries, then the answer that stood"
+    );
+}
+
+#[test]
+fn a_remote_model_list_that_is_not_the_documented_shape_is_an_error() {
+    for body in [
+        r#"{"models":[{"name":"jev-latest"}]}"#,
+        r#"{"models":[{"name":"","description":"x","release_date":"2025-11-04"}]}"#,
+        r#"{"data":[]}"#,
+        "not JSON",
+    ] {
+        let stand_in = StandIn::start(Replies::InOrder(vec![reply("200 OK", body)]));
+        let data_home = TempDir::new("serve-models-incomplete");
+        fixture::write_inferable(&data_home.path().join("s1gate/models"));
+        let server = remote_server(&data_home, &stand_in.endpoint());
+
+        let (status, answer) = server.get_models();
+        assert_eq!(status, 502, "{body} answered {answer}");
+        assert!(answer["detail"].is_array(), "{answer}");
+    }
 }
 
 #[test]
@@ -684,6 +826,7 @@ fn read_http_request(stream: &mut TcpStream) -> String {
             continue;
         };
         let head = String::from_utf8_lossy(&request[..end]);
+        // A request that names no length, such as a GET, carries no body.
         let length = head
             .lines()
             .find_map(|line| {
@@ -691,7 +834,7 @@ fn read_http_request(stream: &mut TcpStream) -> String {
                 name.eq_ignore_ascii_case("content-length")
                     .then(|| value.trim().parse::<usize>().expect("content length"))
             })
-            .expect("Content-Length");
+            .unwrap_or(0);
         if request.len() >= end + 4 + length {
             return String::from_utf8(request).expect("UTF-8 request");
         }
