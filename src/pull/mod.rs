@@ -1,8 +1,9 @@
 //! Pull: stream a Checkpoint's files from a Model Source into the Model Store and record its
 //! Provenance.
 //!
-//! This is the only operation in s1gate that reaches the network (ADR-0003), which is why the HTTP
-//! client lives inside this module and nowhere else.
+//! This is the only operation that downloads a Checkpoint (ADR-0013). `TypeSafe` is also reached by
+//! the remote Backend of a `jev-*` Model Identifier and by the Model Router's model list
+//! (ADR-0016), and `serve` binds a listener; nothing else opens a socket.
 //!
 //! A Pull writes each file to `<path>.part` and renames it only after the bytes match the checksum
 //! the Model Source publishes, so a file under its final name is always the file the record

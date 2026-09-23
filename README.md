@@ -51,7 +51,7 @@ Checkpoint as it was.
 
 List the Model Identifiers currently available to `infer`, one per line. A local Model Source is
 listed when its completed Pull record and every required file are present. `jev-latest` is listed
-when a non-empty TypeSafe API key is configured through `TYPESAFE_API_KEY` or
+when a non-empty `TypeSafe` API key is configured through `TYPESAFE_API_KEY` or
 `typesafe.api_key` in the configuration file. The command makes no network request. It prints an
 empty list when no Model Identifier is available.
 
@@ -110,7 +110,7 @@ A Question is one of exactly three types. `choice` picks a labelled Option and r
 distribution over them; `score` reports the probability-weighted index over ordered Levels;
 `noul` reports the probability of the true side. Answers keep the caller's Question ids. `choice`
 accepts 1 to 255 named Options locally; `score` accepts 1 to 10 Levels locally. Jev calls follow
-the published TypeSafe schema, which places no Option count limit on Choice. `state` can be a
+the published `TypeSafe` schema, which places no Option count limit on Choice. `state` can be a
 string, object, or array. `instructions` can also be omitted or null. The numbers below only show
 the shape of one response:
 
@@ -140,7 +140,7 @@ the shape of one response:
 }
 ```
 
-To use Jev, set `model` to `jev-latest` and provide a TypeSafe API key through configuration or
+To use Jev, set `model` to `jev-latest` and provide a `TypeSafe` API key through configuration or
 `TYPESAFE_API_KEY`. That choice sends the call's State and Questions to `TypeSafe`. Laya uses its
 stored Checkpoint and makes no network request.
 
@@ -160,7 +160,7 @@ does not fall back to the file. `typesafe.endpoint` overrides the default Jev en
 list is read from `models` on the same base, so a proxy reached through `typesafe.endpoint`
 answers `GET /v1/models` too.
 
-Jev HTTP 422 responses exit with code 2 because TypeSafe rejected the System One Call. Authentication,
+Jev HTTP 422 responses exit with code 2 because `TypeSafe` rejected the System One Call. Authentication,
 other HTTP, network, and malformed-response failures exit with code 1. Error output includes the HTTP
 status and a short API message when available; it omits the API key and request body. HTTP 429 and 529
 responses are retried up to two times. Each retry honors a `Retry-After` delay in seconds or HTTP date,

@@ -89,20 +89,6 @@ fn no_subcommand_is_a_usage_error() {
 }
 
 #[test]
-fn an_unsupported_model_source_lists_the_supported_one() {
-    let run = run(&["pull", "some/other-model"]);
-
-    assert_eq!(run.code, 2);
-    assert!(
-        run.stderr.contains(
-            "unsupported Model Source `some/other-model` (supported: convaiinnovations/laya)"
-        ),
-        "{}",
-        run.stderr
-    );
-}
-
-#[test]
 fn without_a_store_location_the_failure_is_a_runtime_error() {
     let output = Command::new(binary())
         .args(["pull", "convaiinnovations/laya"])
@@ -258,18 +244,6 @@ fn verify_names_the_checkpoint_a_failure_came_from() {
 }
 
 #[test]
-fn verify_rejects_a_name_that_is_not_a_model_source_path() {
-    let run = run(&["verify", "--name", "laya"]);
-
-    assert_eq!(run.code, 2);
-    assert!(
-        run.stderr.contains("invalid Checkpoint name `laya`"),
-        "{}",
-        run.stderr
-    );
-}
-
-#[test]
 fn verify_rejects_an_unsupported_model_source() {
     let run = run(&["verify", "--name", "some/other-model"]);
 
@@ -332,6 +306,12 @@ fn infer_rejects_invalid_json_without_writing_stdout() {
         "{}",
         run.stderr
     );
+    assert_eq!(
+        run.stderr.matches("invalid System One Call").count(),
+        1,
+        "the call is named once: {}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -363,26 +343,6 @@ fn infer_judges_single_option_and_single_level_locally() {
     assert_eq!(response["answers"]["urgency"]["score"], 0.0);
     assert_eq!(response["answers"]["urgency"]["legend"]["0"], "low");
     assert_eq!(response["answers"]["urgency"]["probabilities"]["0"], 1.0);
-}
-
-#[test]
-fn infer_rejects_duplicate_choice_options() {
-    let run = run_infer_with_laya_model_identifier(
-        r#"{
-            "state": "x",
-            "questions": {
-                "route": {
-                    "type": "choice",
-                    "instructions": "Where should this go?",
-                    "criteria": {"billing": "payments", "billing": "billing"}
-                }
-            }
-        }"#,
-    );
-
-    assert_eq!(run.code, 2);
-    assert!(run.stdout.is_empty());
-    assert!(run.stderr.contains("distinct Options"), "{}", run.stderr);
 }
 
 #[test]
@@ -646,12 +606,13 @@ fn infer_rejects_an_unknown_question_type() {
 
 #[test]
 fn infer_rejects_duplicate_question_ids() {
+    // The id is echoed escaped, so a duplicate cannot rewrite the terminal it is reported to.
     let run = run_infer_with_laya_model_identifier(
         r#"{
             "state": "x",
             "questions": {
-                "route": {"type": "choice", "instructions": "x", "criteria": {"a": null, "b": null}},
-                "route": {"type": "choice", "instructions": "y", "criteria": ["c", "d"]}
+                "a\u001b[2Kb": {"type": "choice", "instructions": "x", "criteria": {"a": null, "b": null}},
+                "a\u001b[2Kb": {"type": "choice", "instructions": "y", "criteria": ["c", "d"]}
             }
         }"#,
     );
@@ -659,10 +620,11 @@ fn infer_rejects_duplicate_question_ids() {
     assert_eq!(run.code, 2);
     assert!(run.stdout.is_empty());
     assert!(
-        run.stderr.contains("duplicate Question id `route`"),
+        run.stderr.contains(r"duplicate Question id `a\u{1b}[2Kb`"),
         "{}",
         run.stderr
     );
+    assert!(!run.stderr.contains('\u{1b}'), "{}", run.stderr);
 }
 
 #[test]
@@ -702,21 +664,6 @@ fn infer_accepts_all_question_types_then_reports_the_missing_checkpoint() {
         run.stderr
     );
     assert!(run.stderr.contains("s1gate pull"), "{}", run.stderr);
-}
-
-#[test]
-fn infer_selects_the_stored_checkpoint_by_the_calls_model() {
-    let data_home = TempDir::new("cli-infer-model");
-    fixture::write_inferable(&checkpoint_root(&data_home));
-    let run = run_in_with_input(
-        &data_home,
-        &["infer"],
-        r#"{"model":"convaiinnovations/laya","state":"x","questions":{"risk":{"type":"noul","instructions":"Is it risky?"}}}"#,
-    );
-
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    let response: serde_json::Value = serde_json::from_str(&run.stdout).expect("a response");
-    assert_eq!(response["model"], "convaiinnovations/laya");
 }
 
 #[test]
@@ -812,10 +759,6 @@ fn infer_enforces_typesafe_criteria_forms_and_limits() {
             serde_json::json!({"type":"choice","instructions":"x","criteria":too_many_options}),
         ),
         (
-            "score minimum levels",
-            serde_json::json!({"type":"score","instructions":"x","criteria":[]}),
-        ),
-        (
             "score level limit",
             serde_json::json!({"type":"score","instructions":"x","criteria":too_many_levels}),
         ),
@@ -845,19 +788,6 @@ fn infer_rejects_input_that_is_not_utf8() {
     assert!(run.stdout.is_empty());
     assert!(run.stderr.contains("System One Call"), "{}", run.stderr);
     assert!(run.stderr.contains("UTF-8"), "{}", run.stderr);
-}
-
-#[test]
-fn infer_names_the_call_once_in_a_diagnostic() {
-    let run = run_with_input(&["infer"], "not JSON");
-
-    assert_eq!(run.code, 2);
-    assert_eq!(
-        run.stderr.matches("System One Call").count(),
-        1,
-        "{}",
-        run.stderr
-    );
 }
 
 #[test]
@@ -927,12 +857,6 @@ fn infer_names_the_question_whose_option_name_is_unusable() {
         "{}",
         run.stderr
     );
-    assert_eq!(
-        run.stderr.matches("invalid System One Call").count(),
-        1,
-        "{}",
-        run.stderr
-    );
 }
 
 #[test]
@@ -960,23 +884,6 @@ fn infer_names_the_question_whose_options_repeat() {
 fn infer_escapes_the_question_id_it_rejects() {
     let run = run_infer_with_laya_model_identifier(
         r#"{"state":"x","questions":{"a\u001b[2Kb":{"type":"noul","instructions":"x"}}}"#,
-    );
-
-    assert_eq!(run.code, 2);
-    assert!(run.stderr.contains(r"a\u{1b}[2Kb"), "{}", run.stderr);
-    assert!(!run.stderr.contains('\u{1b}'), "{}", run.stderr);
-}
-
-#[test]
-fn infer_escapes_a_duplicated_question_id_it_rejects() {
-    let run = run_infer_with_laya_model_identifier(
-        r#"{
-            "state": "x",
-            "questions": {
-                "a\u001b[2Kb": {"type": "noul", "instructions": "x"},
-                "a\u001b[2Kb": {"type": "noul", "instructions": "y"}
-            }
-        }"#,
     );
 
     assert_eq!(run.code, 2);

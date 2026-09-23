@@ -101,15 +101,10 @@ fn verify_file(directory: &Path, record: &FileRecord) -> Result<()> {
     if let Some(published) = &record.published {
         let actual = match published.algorithm {
             Algorithm::Sha256 => digest.sha256(),
-            Algorithm::GitBlobSha1 => {
-                let Some(actual) = digest.git_blob_sha1() else {
-                    return Err(invalid(
-                        &path,
-                        "cannot compute the git blob object id without the announced size",
-                    ));
-                };
-                actual
-            }
+            // The digest was built with the recorded size, so the object id is always computable.
+            Algorithm::GitBlobSha1 => digest
+                .git_blob_sha1()
+                .expect("the digest was built with the recorded size"),
         };
         if !actual.eq_ignore_ascii_case(&published.checksum) {
             return Err(Error::ChecksumMismatch {

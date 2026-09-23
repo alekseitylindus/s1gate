@@ -57,8 +57,9 @@ enum Local {
     /// Select the local Backend from the Model Store for each Call.
     FromStore,
     /// The local Backend the server loaded at startup, judged one Call at a time. `None` when no
-    /// Checkpoint was present, so no local Model Identifier is served.
-    Loaded(Option<Mutex<Loaded>>),
+    /// Checkpoint was present, so no local Model Identifier is served. Boxed so a variant that is
+    /// empty for every process that resolves its Checkpoint per Call is not the enum's size.
+    Loaded(Option<Box<Mutex<Loaded>>>),
 }
 
 impl ModelRouter {
@@ -109,7 +110,7 @@ impl ModelRouter {
         )
     }
 
-    /// Use the process configuration for the Model Store and TypeSafe Backend.
+    /// Use the process configuration for the Model Store and `TypeSafe` Backend.
     pub fn from_env() -> Self {
         Self::with_settings(
             crate::typesafe::ENDPOINT,
@@ -123,7 +124,7 @@ impl ModelRouter {
     pub(crate) fn for_server() -> Result<Self> {
         let store = Store::from_env()?;
         let local = if store.provenance(model_source::LAYA.repo)?.is_some() {
-            Some(Mutex::new(Loaded::load(&store, &model_source::LAYA)?))
+            Some(Box::new(Mutex::new(Loaded::load(&store, &model_source::LAYA)?)))
         } else {
             None
         };

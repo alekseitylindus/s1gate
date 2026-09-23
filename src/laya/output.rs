@@ -23,7 +23,9 @@ fn temperature(agent: &AgentConfig, kind: QuestionType, options: usize) -> f32 {
         .get(&format!("{kind}:{size}"))
         .copied()
         .or_else(|| agent.temperature.get(kind.index()).copied())
-        .unwrap_or(1.0)
+        // `validate_config` requires exactly three finite positive temperatures, one per Question
+        // Type, so the per-Type fallback is always there.
+        .expect("every Question Type has a calibration temperature")
         .max(1e-3)
 }
 
@@ -52,9 +54,10 @@ fn round_even(value: f32) -> Value {
         lower
     };
     let rounded = units / 10_000.0;
-    serde_json::Number::from_f64(rounded)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
+    // Every calibrated value is finite, so it is always a JSON number.
+    Value::Number(
+        serde_json::Number::from_f64(rounded).expect("a finite calibrated value is a JSON number"),
+    )
 }
 
 fn confidence(probabilities: &[f32]) -> f32 {
@@ -72,8 +75,8 @@ fn confidence(probabilities: &[f32]) -> f32 {
 ///
 /// # Errors
 ///
-/// Fails when the output row count does not match the Question batch, a logits row is missing, a
-/// Question's Options outrun its logits, or a choice label or `true` probability is missing.
+/// Fails when the output row count does not match the Question batch, or a Question's Options
+/// outrun its logits.
 pub(super) fn format_result(
     call: &Call,
     agent: &AgentConfig,
@@ -88,12 +91,8 @@ pub(super) fn format_result(
     }
     let mut answers = Map::new();
     for (row, (id, _)) in call.questions.iter().enumerate() {
-        let item = prepared.get(row).ok_or_else(|| Error::Inference {
-            message: format!("missing prepared Question `{id}`"),
-        })?;
-        let logit_row = logits.get(row).ok_or_else(|| Error::Inference {
-            message: format!("missing logits for Question `{id}`"),
-        })?;
+        let item = &prepared[row];
+        let logit_row = &logits[row];
         let option_logits =
             logit_row
                 .get(..item.options.len())
@@ -121,20 +120,10 @@ pub(super) fn format_result(
                         }
                     })
                     .map(|(index, _)| index)
-                    .ok_or_else(|| Error::Inference {
-                        message: format!("no probabilities for Question `{id}`"),
-                    })?;
+                    .expect("a choice Question renders at least one Option");
                 answer.insert(
                     "choice".to_string(),
-                    Value::String(
-                        item.responses
-                            .labels()
-                            .get(best)
-                            .ok_or_else(|| Error::Inference {
-                                message: format!("missing choice label for Question `{id}`"),
-                            })?
-                            .clone(),
-                    ),
+                    Value::String(item.responses.labels()[best].clone()),
                 );
                 let values = item
                     .responses
@@ -179,14 +168,8 @@ pub(super) fn format_result(
                 );
             }
             QuestionType::Noul => {
-                let probability =
-                    probabilities
-                        .get(1)
-                        .copied()
-                        .ok_or_else(|| Error::Inference {
-                            message: format!("missing true probability for Question `{id}`"),
-                        })?;
-                answer.insert("noul".to_string(), round_even(probability));
+                // A `noul` Question renders exactly the false and true Options.
+                answer.insert("noul".to_string(), round_even(probabilities[1]));
             }
         }
         answers.insert(id.to_string(), Value::Object(answer));

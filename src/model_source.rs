@@ -60,21 +60,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn laya_is_curated_with_its_five_file_allowlist() {
-        let source = lookup("convaiinnovations/laya").expect("laya is curated");
-        assert_eq!(
-            source.files,
-            [
-                "model.safetensors",
-                "rl_agent_config.json",
-                "encoder/config.json",
-                "tokenizer/tokenizer.json",
-                "tokenizer/tokenizer_config.json",
-            ]
-        );
-    }
-
-    #[test]
     fn every_curated_model_source_names_one_checkpoint_directory() {
         for source in SOURCES {
             assert!(

@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Pull a Checkpoint into the Model Store; the only command that reaches the network
+    /// Pull a Checkpoint into the Model Store; the only command that downloads Checkpoints
     ///
     /// Without a Model Source, lists the Model Sources s1gate can pull, each with the revision of
     /// the Checkpoint the Model Store already holds for it.

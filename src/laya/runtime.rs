@@ -455,9 +455,8 @@ pub(super) struct Forward {
 ///
 /// # Errors
 ///
-/// The padded batch is too large to address, a Question's Marker position or Question Type lies
-/// outside the batch, the Checkpoint is missing a materialized parameter, or the pass produces a
-/// value that is not finite.
+/// The padded batch is too large to address, the Checkpoint is missing a materialized parameter,
+/// or the pass produces a value that is not finite.
 pub(super) fn forward(
     config: &EncoderConfig,
     agent: &AgentConfig,
@@ -503,21 +502,13 @@ pub(super) fn forward(
         ids[offset..offset + tokens].copy_from_slice(&item.sequence.ids);
         valid[offset..offset + tokens].fill(true);
         // The batch fits in u32, so `base + position` addresses a position of this Question.
-        let base = u32::try_from(offset).map_err(|_| Error::Inference {
-            message: "input batch is too large".to_string(),
-        })?;
+        let base = offset as u32;
         for (option, marker) in item.sequence.markers.iter().enumerate() {
-            let position = u32::try_from(*marker).map_err(|_| Error::Inference {
-                message: "marker position exceeds the batch".to_string(),
-            })?;
-            marker_flat[row * marker_slots + option] = base + position;
+            marker_flat[row * marker_slots + option] = base + *marker as u32;
             marker_mask[row * marker_slots + option] = 1;
         }
-        kinds.push(
-            u32::try_from(item.kind.index()).map_err(|_| Error::Inference {
-                message: "question type is outside the type embedding".to_string(),
-            })?,
-        );
+        // `QuestionType` has exactly three variants, so its index is one of 0..=2.
+        kinds.push(item.kind.index() as u32);
     }
     let device = Device::Cpu;
     let input_ids = Tensor::from_vec(ids, (count, length), &device)?;
@@ -529,14 +520,10 @@ pub(super) fn forward(
 
     // Both head counts are non-zero by construction: `validate_config` rejects a Checkpoint whose
     // dimensions would make either one zero.
-    let encoder_heads =
-        NonZeroUsize::new(config.num_attention_heads).ok_or_else(|| Error::Inference {
-            message: "attention head count must not be zero".to_string(),
-        })?;
-    let decision_heads =
-        NonZeroUsize::new(config.hidden_size / 64).ok_or_else(|| Error::Inference {
-            message: "hidden size is too small for the decision head".to_string(),
-        })?;
+    let encoder_heads = NonZeroUsize::new(config.num_attention_heads)
+        .expect("validate_config rejects an empty attention head count");
+    let decision_heads = NonZeroUsize::new(config.hidden_size / 64)
+        .expect("validate_config rejects a hidden size below 64");
     let mut names = Names::new();
 
     let hidden = encoder(

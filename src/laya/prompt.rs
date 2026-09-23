@@ -147,12 +147,12 @@ fn render_options(question: &Question) -> Result<Rendered> {
                     responses: Responses::Labels(labels),
                 })
             }
+            // `call.rs` rejects both of these before a prompt is prepared.
             Some(Criteria::List(_)) => Err(Error::Inference {
                 message: "choice Criteria must be an object".to_string(),
             }),
-            None => Ok(Rendered {
-                options: Vec::new(),
-                responses: Responses::Labels(Vec::new()),
+            None => Err(Error::Inference {
+                message: "choice Question has no Criteria".to_string(),
             }),
         },
         QuestionType::Score => match question.criteria.as_ref() {
@@ -171,19 +171,25 @@ fn render_options(question: &Question) -> Result<Rendered> {
                     responses: Responses::Levels(levels),
                 })
             }
-            _ => Ok(Rendered {
-                options: Vec::new(),
-                responses: Responses::Levels(Vec::new()),
+            // `call.rs` rejects both of these before a prompt is prepared.
+            Some(Criteria::Object(_)) => Err(Error::Inference {
+                message: "score Criteria must be an array".to_string(),
+            }),
+            None => Err(Error::Inference {
+                message: "score Question has no Criteria".to_string(),
             }),
         },
         QuestionType::Noul => {
-            let descriptions = question
-                .criteria
-                .as_ref()
-                .and_then(|criteria| match criteria {
-                    Criteria::Object(options) => Some(options),
-                    Criteria::List(_) => None,
-                });
+            let descriptions = match question.criteria.as_ref() {
+                None => None,
+                Some(Criteria::Object(options)) => Some(options),
+                // `call.rs` rejects this before a prompt is prepared.
+                Some(Criteria::List(_)) => {
+                    return Err(Error::Inference {
+                        message: "noul Criteria must be an object".to_string(),
+                    });
+                }
+            };
             let render = |name: &str, fallback: &str| -> Result<String> {
                 match descriptions.and_then(|options| options.iter().find(|(key, _)| key == name)) {
                     Some((_, value)) if describes(value) => render_criterion(value),

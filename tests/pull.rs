@@ -93,7 +93,8 @@ fn pull_records_provenance_for_every_stored_file() {
         assert_eq!(published.checksum, expected, "{path} published checksum");
     }
 
-    // Literals from `sha256sum` and `git hash-object` for the published `rl_agent_config.json`.
+    // Literals from `sha256sum` and `git hash-object` over this commit's own 58-byte
+    // `rl_agent_config.json`, which the Model Source stand-in served above.
     let record = provenance.file("rl_agent_config.json").expect("recorded");
     assert_eq!(record.size, 58);
     assert_eq!(
@@ -513,6 +514,13 @@ fn pull_verifies_a_file_the_model_source_serves_without_redirecting() {
             .to_string()
             .starts_with("`rl_agent_config.json` hashes to "),
         "unexpected message: {error}"
+    );
+    assert!(
+        source
+            .requests()
+            .iter()
+            .all(|request| !request.target.contains("/blob/")),
+        "the Model Source served the bytes itself, so no presigned transfer was followed"
     );
 }
 

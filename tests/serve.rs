@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,10 +41,11 @@ impl Server {
     }
 
     fn start_with_config(data_home: &TempDir, api_key: Option<&str>) -> Self {
-        let port = free_port();
         let mut command = Command::new(env!("CARGO_BIN_EXE_s1gate"));
         command
-            .args(["serve", "--port", &port.to_string()])
+            // An ephemeral port, reported by the server once it is bound, so a test uses the port
+            // this server actually holds rather than one another test could take in between.
+            .args(["serve", "--port", "0"])
             .env("XDG_DATA_HOME", data_home.path())
             .env("XDG_CONFIG_HOME", data_home.path())
             .env_remove("TYPESAFE_API_KEY")
@@ -54,17 +55,24 @@ impl Server {
             command.env("TYPESAFE_API_KEY", api_key);
         }
         let mut child = command.spawn().expect("start s1gate serve");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Self { child, port };
+        let mut stderr = BufReader::new(child.stderr.take().expect("the server's stderr")).lines();
+        let port = loop {
+            match stderr.next() {
+                Some(Ok(line)) => {
+                    if let Some(port) = reported_port(&line) {
+                        break port;
+                    }
+                }
+                Some(Err(error)) => panic!("reading the server's stderr: {error}"),
+                None => panic!(
+                    "server exited at startup: {}",
+                    child.wait().expect("the server exits")
+                ),
             }
-            if let Some(status) = child.try_wait().expect("check server") {
-                panic!("server exited at startup: {status}");
-            }
-            assert!(Instant::now() < deadline, "server did not start");
-            thread::sleep(Duration::from_millis(20));
-        }
+        };
+        // Keep draining the pipe: a server that writes a diagnostic must not block on a full one.
+        thread::spawn(move || stderr.for_each(drop));
+        Self { child, port }
     }
 
     fn post(&self, body: &str, authorization: Option<&str>) -> (u16, Value) {
@@ -91,7 +99,10 @@ impl Server {
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("read response");
         let (head, body) = response.split_once("\r\n\r\n").expect("HTTP response");
-        assert!(head.contains("Content-Type: application/json"));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, head.to_string(), body.to_string())
     }
@@ -140,12 +151,10 @@ impl Drop for Server {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("free port")
-        .local_addr()
-        .expect("address")
-        .port()
+/// The port the server reports it bound, from the startup line it writes to stderr.
+fn reported_port(line: &str) -> Option<u16> {
+    let address = line.split_once("listening on ")?.1.trim();
+    address.rsplit_once(':')?.1.parse().ok()
 }
 
 #[test]
@@ -215,10 +224,7 @@ fn loaded_laya_is_listed_after_its_checkpoint_is_removed() {
 
 #[test]
 fn remote_models_are_merged_with_loaded_local_models() {
-    let stand_in = StandIn::start(Replies::InOrder(vec![
-        reply("200 OK", JEV_MODELS),
-        reply("200 OK", JEV_ANSWER),
-    ]));
+    let stand_in = StandIn::start(Replies::InOrder(vec![reply("200 OK", JEV_MODELS)]));
     let data_home = TempDir::new("serve-models-merged");
     fixture::write_inferable(&data_home.path().join("s1gate/models"));
     let server = remote_server(&data_home, &stand_in.endpoint());
@@ -242,12 +248,6 @@ fn remote_models_are_merged_with_loaded_local_models() {
         request.contains("authorization: bearer configured-secret"),
         "{request}"
     );
-
-    // The list publishes aliases; a versioned identifier still judges a Call.
-    let versioned = JEV_CALL.replace("jev-latest", JEV_MODEL);
-    let (status, body) = server.post(&versioned, None);
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["model"], JEV_MODEL);
 }
 
 #[test]

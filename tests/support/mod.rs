@@ -39,8 +39,6 @@ struct State {
 /// How the Model Source answers a request for one of its files.
 #[derive(Clone, Copy, Debug)]
 enum Presence {
-    /// Do not publish the file at all.
-    Absent,
     /// Redirect to the presigned transfer, as the Model Source does.
     Redirect,
     /// Serve the file's bytes itself.
@@ -127,11 +125,6 @@ impl FakeSource {
             .insert(name.to_string(), commit.to_string());
     }
 
-    /// Name the revision the default branch resolves to.
-    pub fn set_default_branch(&self, branch: &str) {
-        self.state.lock().default_branch = branch.to_string();
-    }
-
     /// The requests received so far, in arrival order.
     pub fn requests(&self) -> Vec<Request> {
         self.state.lock().requests.clone()
@@ -212,12 +205,6 @@ impl ServedFile {
     /// Answer with only the first `bytes` of the body.
     pub fn truncated_at(mut self, bytes: usize) -> Self {
         self.truncate_at = Some(bytes);
-        self
-    }
-
-    /// Do not publish this file at all.
-    pub fn absent(mut self) -> Self {
-        self.presence = Presence::Absent;
         self
     }
 
@@ -421,11 +408,6 @@ impl Reply {
         reply.body = body;
         reply
     }
-
-    fn header(mut self, name: &str, value: &str) -> Self {
-        self.headers.push((name.to_string(), value.to_string()));
-        self
-    }
 }
 
 fn route(state: &State, target: &str) -> Reply {
@@ -476,12 +458,6 @@ fn route(state: &State, target: &str) -> Reply {
         return match find(state, commit, &file) {
             Some(served) => {
                 let status = match served.presence {
-                    Presence::Absent => {
-                        return Reply::json(
-                            404,
-                            format!("{{\"error\": \"Entry not found: {file}\"}}"),
-                        );
-                    }
                     Presence::Redirect => 307,
                     Presence::Direct => 200,
                 };

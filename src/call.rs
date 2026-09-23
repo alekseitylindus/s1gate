@@ -123,7 +123,7 @@ pub struct Question {
     /// The kind of Answer this Question expects.
     #[serde(rename = "type")]
     pub kind: QuestionType,
-    /// What the Question asks, rendered into its prompt; TypeSafe permits omitting it.
+    /// What the Question asks, rendered into its prompt; `TypeSafe` permits omitting it.
     #[serde(default)]
     pub instructions: Value,
     /// The answer space the Question defines; a `noul` Question may leave it out.
