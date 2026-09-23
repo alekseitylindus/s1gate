@@ -70,7 +70,8 @@ verified convaiinnovations/laya@1c5edc17a7acd8701df6fc341c0d179f1c62c982 (5 file
 
 Judge exactly one System One Call, read as JSON on stdin. Set `model` to
 `convaiinnovations/laya` to use its stored Checkpoint, or any `jev-*` identifier to use
-`TypeSafe`'s hosted Backend. Laya reports the requested Model Identifier. Jev reports the
+`TypeSafe`'s hosted Backend. `infer` and `serve` resolve that identifier through the same Model
+Router (ADR-0017). Laya reports the requested Model Identifier. Jev reports the
 versioned Resolved Model Identifier from `TypeSafe`. The Answers are written as JSON on stdout:
 
 ```console
