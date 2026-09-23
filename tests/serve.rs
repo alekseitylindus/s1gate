@@ -54,6 +54,21 @@ impl Server {
     fn post(&self, body: &str, authorization: Option<&str>) -> (u16, Value) {
         post(self.port, body, authorization)
     }
+
+    fn get_models(&self) -> (u16, Value) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect to server");
+        write!(
+            stream,
+            "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .expect("send model list request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        let (head, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+        assert!(head.contains("Content-Type: application/json"));
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).expect("JSON response"))
+    }
 }
 
 fn post(port: u16, body: &str, authorization: Option<&str>) -> (u16, Value) {
@@ -128,6 +143,38 @@ fn empty_store_starts_and_invalid_calls_get_typesafe_detail() {
     let (status, body) = server.post(&unknown, None);
     assert_eq!(status, 422);
     assert!(body["detail"].is_array(), "{body}");
+}
+
+#[test]
+fn empty_local_server_lists_no_models_without_a_typesafe_key() {
+    let data_home = TempDir::new("serve-empty-models");
+    let server = Server::start(&data_home);
+    assert_eq!(
+        server.get_models(),
+        (200, serde_json::json!({"models": []}))
+    );
+
+    fixture::write_inferable(&data_home.path().join("s1gate/models"));
+    assert_eq!(
+        server.get_models(),
+        (200, serde_json::json!({"models": []}))
+    );
+}
+
+#[test]
+fn loaded_laya_is_listed_after_its_checkpoint_is_removed() {
+    let data_home = TempDir::new("serve-loaded-models");
+    let checkpoint = fixture::write_inferable(&data_home.path().join("s1gate/models"));
+    let server = Server::start(&data_home);
+    std::fs::remove_dir_all(checkpoint).expect("remove on-disk Checkpoint");
+
+    let (status, body) = server.get_models();
+    assert_eq!(status, 200);
+    let models = body["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["name"], "convaiinnovations/laya");
+    assert_eq!(models[0]["release_date"], "2026-09-18");
+    assert!(models[0]["description"].as_str().is_some_and(|s| !s.is_empty()));
 }
 
 #[test]

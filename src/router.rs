@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::call::Call;
 use crate::error::{Error, Result};
@@ -26,6 +26,20 @@ enum Local {
 }
 
 impl ModelRouter {
+    /// Describe the local Backends loaded when the HTTP server started.
+    pub(crate) fn loaded_local_models(&self) -> Value {
+        let models = if matches!(self.local, Local::Loaded(Some(_))) {
+            vec![json!({
+                "name": model_source::LAYA.repo,
+                "description": "Laya, a local Backend for choice, score, and noul Questions.",
+                "release_date": "2026-09-18"
+            })]
+        } else {
+            Vec::new()
+        };
+        json!({"models": models})
+    }
+
     /// Use the process configuration for the Model Store and TypeSafe Backend.
     pub fn from_env() -> Self {
         Self::with_settings(

@@ -183,6 +183,11 @@ absent Checkpoints. Local Calls run sequentially against the loaded Checkpoint u
 changes to the Model Store take effect after a restart. The server never Pulls a Checkpoint.
 Incoming Authorization is optional; Jev Calls use the server's configured `TYPESAFE_API_KEY`.
 
+`GET /v1/models` returns a TypeSafe-shaped `models` array describing the local Backends loaded at
+startup. Laya appears as `convaiinnovations/laya` with release date `2026-09-18` when its
+Checkpoint was loaded. With no local Checkpoint, the array is empty. Discovery needs no `TypeSafe`
+key and makes no remote request.
+
 ## Model Store
 
 The Model Store lives at `$XDG_DATA_HOME/s1gate/models`, defaulting to

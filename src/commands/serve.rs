@@ -54,6 +54,9 @@ pub fn run(args: Args) -> Result<()> {
 fn serve_connection(stream: &mut TcpStream, router: &ModelRouter) -> std::io::Result<()> {
     let request = read_request(stream);
     let (status, body) = match request {
+        Ok((method, path, _)) if method == "GET" && path == "/v1/models" => {
+            (200, router.loaded_local_models())
+        }
         Ok((method, path, body)) if method == "POST" && path == "/v1/systemone" => {
             match router.route(&body) {
                 Ok(value) => (200, value),
@@ -67,7 +70,9 @@ fn serve_connection(stream: &mut TcpStream, router: &ModelRouter) -> std::io::Re
                 Err(error) => (500, detail(&error.to_string())),
             }
         }
-        Ok((_, path, _)) if path != "/v1/systemone" => (404, detail("not found")),
+        Ok((_, path, _)) if path != "/v1/systemone" && path != "/v1/models" => {
+            (404, detail("not found"))
+        }
         Ok(_) => (405, detail("method not allowed")),
         Err(message) => (400, detail(&message)),
     };
@@ -132,7 +137,9 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<(String, String, 
             );
         }
     }
-    let length = content_length.ok_or("missing Content-Length")?;
+    let length = content_length
+        .or_else(|| (method == "GET").then_some(0))
+        .ok_or("missing Content-Length")?;
     if length > MAX_BODY {
         return Err("HTTP body is too large".to_string());
     }
