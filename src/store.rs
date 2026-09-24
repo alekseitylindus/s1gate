@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::checkpoint::Report;
 use crate::error::{Error, Result};
+use crate::model_source::ModelSource;
 use crate::provenance::Provenance;
 
 /// The store root below `$XDG_DATA_HOME`; the Checkpoint of `owner/name` lives at
@@ -41,19 +43,43 @@ impl Store {
         )?))
     }
 
-    /// The directory the Checkpoints live below.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Where the Checkpoint of the Model Source `name` lives.
     ///
     /// # Errors
     ///
     /// `name` is not one `<owner>/<name>` pair of directory names: [`Error::InvalidName`].
-    pub fn checkpoint_dir(&self, name: &str) -> Result<PathBuf> {
+    pub(crate) fn checkpoint_dir(&self, name: &str) -> Result<PathBuf> {
         let (owner, checkpoint) = segments(name)?;
         Ok(self.root.join(owner).join(checkpoint))
+    }
+
+    /// The Checkpoint of `source`, or `None` when this store holds none.
+    ///
+    /// # Errors
+    ///
+    /// `source` names no Checkpoint directory ([`Error::InvalidName`]), the record cannot be read
+    /// ([`Error::Io`] or [`Error::Json`]), or the record names another Model Source
+    /// ([`Error::InvalidCheckpoint`]) — a Checkpoint is held under the Model Source it came from
+    /// (ADR-0011), so a record that says otherwise is not this Checkpoint.
+    pub fn checkpoint(&self, source: &'static ModelSource) -> Result<Option<Checkpoint>> {
+        let directory = self.checkpoint_dir(source.repo)?;
+        let Some(provenance) = self.provenance(source.repo)? else {
+            return Ok(None);
+        };
+        if provenance.source != source.repo {
+            return Err(Error::invalid_checkpoint(
+                directory.join(Provenance::FILE_NAME),
+                format!(
+                    "Provenance names `{}`, expected `{}`",
+                    provenance.source, source.repo
+                ),
+            ));
+        }
+        Ok(Some(Checkpoint {
+            directory,
+            provenance,
+            source,
+        }))
     }
 
     /// The Provenance `name` records, or `None` when it holds no Checkpoint.
@@ -153,6 +179,81 @@ impl Store {
             Err(error) => Err(Error::io("remove", &directory, error)),
         }
     }
+}
+
+/// One Checkpoint the Model Store holds: its directory, the Provenance record whose presence marks
+/// it complete, and the Model Source whose allowlist its files must be (ADR-0011).
+///
+/// This is what "the Model Store holds a usable Checkpoint" means, so a caller asks the handle
+/// instead of re-deriving the rule from the record and the allowlist.
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    directory: PathBuf,
+    provenance: Provenance,
+    source: &'static ModelSource,
+}
+
+impl Checkpoint {
+    /// The Checkpoint's directory in the Model Store.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// The record that marks this Checkpoint complete.
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    /// Whether every file the Model Source's allowlist names is a file here. This is what a Model
+    /// Identifier's availability rests on, and it hashes nothing: a Checkpoint whose bytes changed
+    /// is present all the same, and fails [`Self::verify`] rather than this.
+    ///
+    /// # Errors
+    ///
+    /// An allowlisted path cannot be inspected, which is a fault rather than an absent file.
+    pub fn files_present(&self) -> Result<bool> {
+        for path in self.source.files {
+            let file = self.directory.join(path);
+            match std::fs::metadata(&file) {
+                Ok(metadata) if metadata.is_file() => {}
+                // A directory, and a link to nothing, is not the file the allowlist names.
+                Ok(_) => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(Error::io("inspect", &file, error)),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Verify every stored file against this record, and the weights header against the Parameter
+    /// Manifest the Checkpoint's own configuration describes (ADR-0005).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidCheckpoint`] when a configuration or the weights header is not what it must
+    /// be; [`Error::MissingStoredFile`], [`Error::StoredSizeMismatch`],
+    /// [`Error::StoredChecksumMismatch`] and [`Error::ChecksumMismatch`] when a stored file is not
+    /// the file the record describes; [`Error::MissingParameter`], [`Error::UnexpectedParameter`]
+    /// and [`Error::ParameterMismatch`] when the weights header disagrees with the Parameter
+    /// Manifest; [`Error::Io`] or [`Error::Json`] when a Checkpoint file cannot be read.
+    pub fn verify(&self) -> Result<Report> {
+        crate::checkpoint::verify(self)
+    }
+
+    /// The Model Source this Checkpoint is held under, which is the source of its allowlist.
+    pub(crate) fn source(&self) -> &'static ModelSource {
+        self.source
+    }
+}
+
+/// Check that `name` is a Model Source name the Model Store can hold a Checkpoint under: one
+/// `<owner>/<name>` pair of directory names, neither a level of its own.
+///
+/// # Errors
+///
+/// [`Error::InvalidName`] when it is not.
+pub(crate) fn valid_name(name: &str) -> Result<()> {
+    segments(name).map(|_| ())
 }
 
 /// `$XDG_DATA_HOME/s1gate/models`, defaulting to `~/.local/share/s1gate/models` (ADR-0011). A
@@ -333,6 +434,54 @@ mod tests {
         store.discard_checkpoint("convaiinnovations/laya").unwrap();
         assert!(!directory.exists(), "the name is free again");
         store.discard_checkpoint("convaiinnovations/laya").unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_checkpoint_is_present_only_with_every_allowlisted_file() {
+        let root = temp_dir("presence");
+        let store = Store::at(&root);
+        let source = &crate::model_source::LAYA;
+
+        assert!(
+            store.checkpoint(source).unwrap().is_none(),
+            "a store that records nothing holds no Checkpoint"
+        );
+
+        store.record_provenance(source.repo, &provenance()).unwrap();
+        let checkpoint = store
+            .checkpoint(source)
+            .unwrap()
+            .expect("the record is stored");
+        let directory = store.checkpoint_dir(source.repo).unwrap();
+        assert_eq!(checkpoint.directory(), directory);
+        assert_eq!(checkpoint.provenance().source, source.repo);
+        assert!(
+            !checkpoint.files_present().unwrap(),
+            "no allowlisted file is stored yet"
+        );
+
+        // A directory where an allowlisted file belongs is not that file.
+        std::fs::create_dir_all(directory.join(source.files[0])).unwrap();
+        for path in source.files.iter().skip(1) {
+            let file = directory.join(*path);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&file, b"x").unwrap();
+        }
+        assert!(
+            !checkpoint.files_present().unwrap(),
+            "a directory is not the file the allowlist names"
+        );
+
+        std::fs::remove_dir_all(directory.join(source.files[0])).unwrap();
+        std::fs::write(directory.join(source.files[0]), b"x").unwrap();
+        assert!(
+            checkpoint.files_present().unwrap(),
+            "every allowlisted file is there"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

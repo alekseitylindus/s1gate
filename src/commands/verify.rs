@@ -2,10 +2,10 @@
 //! access, one Model Source or the whole Model Store.
 
 use super::checkpoint_name;
-use crate::checkpoint;
+use crate::checkpoint::Report;
 use crate::error::{Error, Result};
-use crate::model_source;
-use crate::store::Store;
+use crate::model_source::{self, ModelSource};
+use crate::store::{Checkpoint, Store};
 
 /// What `verify` was asked for.
 #[derive(clap::Args)]
@@ -22,11 +22,18 @@ pub fn run(args: Args) -> Result<()> {
     let store = Store::from_env()?;
     match named {
         Some(source) => {
-            report(&checkpoint::verify(&store, source)?);
+            report(&stored(&store, source)?.verify()?);
             Ok(())
         }
         None => every_stored(&store),
     }
+}
+
+/// The Checkpoint of `source` in the store, or the error naming the Pull that would provide it.
+fn stored(store: &Store, source: &'static ModelSource) -> Result<Checkpoint> {
+    store
+        .checkpoint(source)?
+        .ok_or_else(|| Error::missing_checkpoint(source.repo))
 }
 
 /// Verify every Checkpoint the store holds, reporting each failure rather than stopping at the
@@ -37,7 +44,10 @@ fn every_stored(store: &Store) -> Result<()> {
     let total = names.len();
     let mut failed = 0;
     for name in names {
-        match model_source::lookup(&name).and_then(|source| checkpoint::verify(store, source)) {
+        let verified = model_source::lookup(&name)
+            .and_then(|source| stored(store, source))
+            .and_then(|checkpoint| checkpoint.verify());
+        match verified {
             Ok(verified) => report(&verified),
             Err(error) => {
                 failed += 1;
@@ -51,7 +61,7 @@ fn every_stored(store: &Store) -> Result<()> {
     }
 }
 
-fn report(report: &checkpoint::Report) {
+fn report(report: &Report) {
     println!(
         "verified {}@{} ({} files)",
         report.provenance.source, report.provenance.resolved_revision, report.files

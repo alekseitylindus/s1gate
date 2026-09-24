@@ -39,7 +39,7 @@ fn run_with_settings(
     xdg_config_home: Option<std::path::PathBuf>,
     home: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let router = ModelRouter::with_settings(endpoint, env_api_key, xdg_config_home, home);
+    let router = ModelRouter::with_settings(endpoint, env_api_key, xdg_config_home, home, None);
     run_with_router(input, stdout, &router)
 }
 

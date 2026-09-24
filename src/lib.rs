@@ -1,7 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 mod commands;
-mod laya;
+mod http;
+pub mod laya;
 mod typesafe;
 
 pub mod call;

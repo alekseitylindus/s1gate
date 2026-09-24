@@ -7,23 +7,21 @@ use std::path::Path;
 
 use crate::digest::Digest;
 use crate::error::{Error, Result};
-use crate::provenance::{Algorithm, FileRecord, Provenance};
-
-use super::invalid;
+use crate::provenance::{FileRecord, Provenance};
+use crate::store::Checkpoint;
 
 const CHUNK: usize = 64 * 1024;
 
 /// The Provenance record and the Checkpoint allowlist must name exactly the same files. The count
 /// and the distinctness of the records, together with every allowlisted path being found below,
 /// are what prove that; a record path outside the allowlist is unreachable from here.
-pub(super) fn verify_records(
-    directory: &Path,
-    expected_paths: &[&str],
-    provenance: &Provenance,
-) -> Result<()> {
+pub(super) fn verify_records(checkpoint: &Checkpoint) -> Result<()> {
+    let directory = checkpoint.directory();
+    let provenance = checkpoint.provenance();
+    let expected_paths = checkpoint.source().files;
     if provenance.files.len() != expected_paths.len() {
-        return Err(invalid(
-            &directory.join(Provenance::FILE_NAME),
+        return Err(Error::invalid_checkpoint(
+            directory.join(Provenance::FILE_NAME),
             format!(
                 "Provenance records {} files, expected {}",
                 provenance.files.len(),
@@ -37,15 +35,15 @@ pub(super) fn verify_records(
         .map(|record| record.path.as_str())
         .collect();
     if unique.len() != provenance.files.len() {
-        return Err(invalid(
-            &directory.join(Provenance::FILE_NAME),
+        return Err(Error::invalid_checkpoint(
+            directory.join(Provenance::FILE_NAME),
             "Provenance contains duplicate file records".to_string(),
         ));
     }
     for path in expected_paths {
         let record = provenance.file(path).ok_or_else(|| {
-            invalid(
-                &directory.join(Provenance::FILE_NAME),
+            Error::invalid_checkpoint(
+                directory.join(Provenance::FILE_NAME),
                 format!("Provenance has no record for `{path}`"),
             )
         })?;
@@ -99,20 +97,7 @@ fn verify_file(directory: &Path, record: &FileRecord) -> Result<()> {
         });
     }
     if let Some(published) = &record.published {
-        let actual = match published.algorithm {
-            Algorithm::Sha256 => digest.sha256(),
-            // The digest was built with the recorded size, so the object id is always computable.
-            Algorithm::GitBlobSha1 => digest
-                .git_blob_sha1()
-                .expect("the digest was built with the recorded size"),
-        };
-        if !actual.eq_ignore_ascii_case(&published.checksum) {
-            return Err(Error::ChecksumMismatch {
-                path: record.path.clone(),
-                expected: published.checksum.clone(),
-                actual,
-            });
-        }
+        published.check(&digest, &record.path)?;
     }
     Ok(())
 }

@@ -231,6 +231,21 @@ impl Error {
         }
     }
 
+    /// The Model Store holds no Checkpoint of `name`.
+    #[must_use]
+    pub fn missing_checkpoint(name: impl Into<String>) -> Self {
+        Self::MissingCheckpoint { name: name.into() }
+    }
+
+    /// `path` holds something other than what it must: `message` says what is wrong with it.
+    #[must_use]
+    pub fn invalid_checkpoint(path: impl Into<PathBuf>, message: impl Into<String>) -> Self {
+        Self::InvalidCheckpoint {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+
     /// 0 success, 1 runtime error, 2 usage error.
     #[must_use]
     pub fn exit_code(&self) -> u8 {

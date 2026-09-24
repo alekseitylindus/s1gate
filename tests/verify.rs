@@ -10,7 +10,7 @@ use support::fixture;
 use support::{TempDir, git_blob_sha1, sha256, tree};
 
 use s1gate::Error;
-use s1gate::checkpoint;
+use s1gate::checkpoint::Report;
 use s1gate::model_source::{self, ModelSource};
 use s1gate::provenance::{Algorithm, Provenance, PublishedChecksum};
 use s1gate::store::Store;
@@ -20,14 +20,22 @@ fn source() -> &'static ModelSource {
     model_source::lookup(fixture::NAME).expect("laya is curated")
 }
 
+/// Verify the fixture Checkpoint of the store rooted at `root`, as `s1gate verify` does: through
+/// the Checkpoint handle, so a store that holds none is reported the way the command reports it.
+fn verify(root: &Path) -> s1gate::Result<Report> {
+    Store::at(root)
+        .checkpoint(source())?
+        .ok_or_else(|| Error::missing_checkpoint(fixture::NAME))?
+        .verify()
+}
+
 #[test]
 fn an_intact_checkpoint_verifies_from_local_files() {
     let root = TempDir::new("verify-intact");
     let directory = fixture::write(root.path(), fixture::header());
     let before = tree(&directory);
 
-    let report =
-        checkpoint::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
+    let report = verify(root.path()).expect("the Checkpoint verifies");
 
     assert_eq!(report.provenance.resolved_revision, fixture::REVISION);
     assert_eq!(report.files, 5);
@@ -44,8 +52,7 @@ fn a_checkpoint_of_head_layers_and_several_encoder_layers_verifies() {
         fixture::layered_header(),
     );
 
-    let report =
-        checkpoint::verify(&Store::at(root.path()), source()).expect("the Checkpoint verifies");
+    let report = verify(root.path()).expect("the Checkpoint verifies");
 
     assert_eq!(report.files, 5);
 }
@@ -65,8 +72,7 @@ fn verification_rejects_a_norm_on_the_encoder_layer_that_has_none() {
         header,
     );
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("layer 0 has an identity norm");
+    let error = verify(root.path()).expect_err("layer 0 has an identity norm");
 
     assert!(matches!(error, Error::UnexpectedParameter { .. }));
     assert!(
@@ -89,8 +95,7 @@ fn verification_rejects_a_missing_head_layer_parameter() {
         header,
     );
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the parameter is gone");
+    let error = verify(root.path()).expect_err("the parameter is gone");
 
     assert!(matches!(error, Error::MissingParameter { .. }));
     assert_eq!(
@@ -107,8 +112,7 @@ fn verification_reports_a_changed_file() {
     let size = fs::metadata(&path).expect("the config exists").len() as usize;
     fs::write(&path, vec![b'x'; size]).expect("change the local file");
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the changed file fails");
+    let error = verify(root.path()).expect_err("the changed file fails");
 
     assert!(matches!(error, Error::StoredChecksumMismatch { .. }));
     assert!(error.to_string().contains("encoder/config.json"), "{error}");
@@ -120,8 +124,7 @@ fn verification_reports_a_missing_file() {
     let directory = fixture::write(root.path(), fixture::header());
     fs::remove_file(directory.join("model.safetensors")).expect("remove a file");
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the missing file fails");
+    let error = verify(root.path()).expect_err("the missing file fails");
 
     assert!(matches!(error, Error::MissingStoredFile { .. }));
     assert_eq!(
@@ -136,8 +139,7 @@ fn verification_reports_a_size_change() {
     let directory = fixture::write(root.path(), fixture::header());
     fs::write(directory.join("encoder/config.json"), b"short").expect("change the local file size");
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the size change fails");
+    let error = verify(root.path()).expect_err("the size change fails");
 
     assert!(matches!(error, Error::StoredSizeMismatch { .. }));
     assert!(error.to_string().contains("encoder/config.json"), "{error}");
@@ -166,8 +168,7 @@ fn verification_accepts_the_checksums_the_model_source_publishes() {
         }
     });
 
-    let report =
-        checkpoint::verify(&Store::at(root.path()), source()).expect("the published values agree");
+    let report = verify(root.path()).expect("the published values agree");
 
     assert_eq!(report.files, 5);
 }
@@ -188,8 +189,7 @@ fn verification_reports_a_published_checksum_that_disagrees() {
         });
     });
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("the published checksum fails");
+    let error = verify(root.path()).expect_err("the published checksum fails");
 
     assert!(matches!(error, Error::ChecksumMismatch { .. }));
     assert!(
@@ -215,8 +215,7 @@ fn verification_reports_a_published_blob_id_that_disagrees() {
         });
     });
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("the published blob id fails");
+    let error = verify(root.path()).expect_err("the published blob id fails");
 
     assert!(matches!(error, Error::ChecksumMismatch { .. }));
     assert!(
@@ -235,8 +234,7 @@ fn verification_rejects_a_parameter_the_manifest_does_not_ask_for() {
     );
     fixture::write(root.path(), header);
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("the extra parameter fails");
+    let error = verify(root.path()).expect_err("the extra parameter fails");
 
     assert!(matches!(error, Error::UnexpectedParameter { .. }));
     assert!(error.to_string().contains("`unexpected.weight`"), "{error}");
@@ -249,8 +247,7 @@ fn verification_rejects_a_parameter_of_the_wrong_shape() {
     header.insert("temperature".to_string(), fixture::tensor("F16", &[3]));
     fixture::write(root.path(), header);
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the wrong shape fails");
+    let error = verify(root.path()).expect_err("the wrong shape fails");
 
     assert!(matches!(error, Error::ParameterMismatch { .. }));
     assert!(error.to_string().contains("`temperature`"), "{error}");
@@ -264,7 +261,7 @@ fn verification_rejects_a_dtype_safetensors_does_not_define() {
     header.insert("temperature".to_string(), fixture::tensor("F4", &[3]));
     fixture::write(root.path(), header);
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the dtype fails");
+    let error = verify(root.path()).expect_err("the dtype fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -285,7 +282,7 @@ fn verification_rejects_a_shape_that_cannot_be_a_length() {
     fs::write(directory.join("model.safetensors"), &bytes).expect("corrupt the weights");
     record_file(root.path(), "model.safetensors", &bytes);
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the shape fails");
+    let error = verify(root.path()).expect_err("the shape fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -306,8 +303,7 @@ fn verification_rejects_a_malformed_safetensors_header() {
     fs::write(&path, &bytes).expect("corrupt the header");
     record_file(root.path(), "model.safetensors", &bytes);
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("the malformed header fails");
+    let error = verify(root.path()).expect_err("the malformed header fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(error.to_string().contains("header is not JSON"), "{error}");
@@ -321,8 +317,7 @@ fn verification_rejects_a_record_that_names_another_model_source() {
         provenance.source = "someone/else".to_string();
     });
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("a foreign record fails");
+    let error = verify(root.path()).expect_err("a foreign record fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -353,8 +348,7 @@ fn verification_rejects_a_record_with_duplicate_files() {
         record.path = path;
     });
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the duplicate fails");
+    let error = verify(root.path()).expect_err("the duplicate fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -376,8 +370,7 @@ fn verification_rejects_a_record_missing_an_allowlisted_file() {
         record.path = "README.md".to_string();
     });
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("the record fails");
+    let error = verify(root.path()).expect_err("the record fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -396,7 +389,7 @@ fn verification_rejects_a_record_with_the_wrong_number_of_files() {
         provenance.files.pop();
     });
 
-    let error = checkpoint::verify(&Store::at(root.path()), source()).expect_err("the count fails");
+    let error = verify(root.path()).expect_err("the count fails");
 
     assert!(matches!(error, Error::InvalidCheckpoint { .. }));
     assert!(
@@ -413,8 +406,7 @@ fn verification_rejects_a_record_that_cannot_be_read() {
     let directory = fixture::write(root.path(), fixture::header());
     fs::write(directory.join("provenance.json"), b"{\"source\":").expect("truncate the record");
 
-    let error = checkpoint::verify(&Store::at(root.path()), source())
-        .expect_err("the truncated record fails");
+    let error = verify(root.path()).expect_err("the truncated record fails");
 
     assert!(matches!(error, Error::Json { .. }));
     assert!(error.to_string().contains("provenance.json"), "{error}");
@@ -424,8 +416,7 @@ fn verification_rejects_a_record_that_cannot_be_read() {
 fn verification_reports_a_checkpoint_the_store_does_not_hold() {
     let root = TempDir::new("verify-absent");
 
-    let error =
-        checkpoint::verify(&Store::at(root.path()), source()).expect_err("nothing is stored");
+    let error = verify(root.path()).expect_err("nothing is stored");
 
     assert!(matches!(error, Error::MissingCheckpoint { .. }));
 }

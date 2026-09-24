@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
-use super::{AGENT_CONFIG, ENCODER_CONFIG, invalid};
+use crate::model_source::{AGENT_CONFIG_FILE, ENCODER_CONFIG_FILE};
 
 /// The most layers either configuration may declare. Both drive a loop that inserts about fifteen
 /// Manifest entries per layer, so a hostile or corrupt count is out-of-memory rather than an error
@@ -134,8 +134,8 @@ pub(super) struct Manifest {
 
 /// Derive the Parameter Manifest of the Checkpoint in `directory` from its own configuration.
 pub(super) fn read(directory: &Path) -> Result<Manifest> {
-    let encoder: EncoderConfig = read_json(&directory.join(ENCODER_CONFIG))?;
-    let agent: AgentConfig = read_json(&directory.join(AGENT_CONFIG))?;
+    let encoder: EncoderConfig = read_json(&directory.join(ENCODER_CONFIG_FILE))?;
+    let agent: AgentConfig = read_json(&directory.join(AGENT_CONFIG_FILE))?;
     Manifest::from_configs(directory, &encoder, &agent)
 }
 
@@ -149,33 +149,33 @@ impl Manifest {
         encoder: &EncoderConfig,
         agent: &AgentConfig,
     ) -> Result<Self> {
-        let encoder_config = directory.join(ENCODER_CONFIG);
-        let agent_config = directory.join(AGENT_CONFIG);
+        let encoder_config = directory.join(ENCODER_CONFIG_FILE);
+        let agent_config = directory.join(AGENT_CONFIG_FILE);
         let hidden = dimension(&encoder_config, encoder.hidden_size)?;
         let intermediate = dimension(&encoder_config, encoder.intermediate_size)?;
         let vocab = dimension(&encoder_config, encoder.vocab_size)?;
         let layers = encoder.num_hidden_layers;
         if layers > MAX_LAYERS {
-            return Err(invalid(&encoder_config, "num_hidden_layers is too large"));
+            return Err(Error::invalid_checkpoint(&encoder_config, "num_hidden_layers is too large"));
         }
         let head_layers = agent.head_layers;
         if head_layers > MAX_LAYERS {
-            return Err(invalid(&agent_config, "head_layers is too large"));
+            return Err(Error::invalid_checkpoint(&agent_config, "head_layers is too large"));
         }
         let doubled_intermediate = intermediate
             .checked_mul(2)
-            .ok_or_else(|| invalid(&encoder_config, "intermediate_size is too large"))?;
+            .ok_or_else(|| Error::invalid_checkpoint(&encoder_config, "intermediate_size is too large"))?;
         let head_width = hidden
             .checked_mul(4)
-            .ok_or_else(|| invalid(&encoder_config, "hidden_size is too large"))?;
+            .ok_or_else(|| Error::invalid_checkpoint(&encoder_config, "hidden_size is too large"))?;
         // The query, key and value projection width, in the encoder and in a head layer.
         let tripled = hidden
             .checked_mul(3)
-            .ok_or_else(|| invalid(&encoder_config, "hidden_size is too large"))?;
+            .ok_or_else(|| Error::invalid_checkpoint(&encoder_config, "hidden_size is too large"))?;
         // The action head reads the hidden state plus the four Question Type features.
         let act_input = hidden
             .checked_add(4)
-            .ok_or_else(|| invalid(&encoder_config, "hidden_size is too large"))?;
+            .ok_or_else(|| Error::invalid_checkpoint(&encoder_config, "hidden_size is too large"))?;
         let actions = dimension(&agent_config, agent.act_costs.len().saturating_add(1))?;
 
         let mut manifest = Self::default();
@@ -290,7 +290,7 @@ impl Manifest {
 }
 
 fn dimension(path: &Path, value: usize) -> Result<u64> {
-    u64::try_from(value).map_err(|_| invalid(path, "a dimension is too large"))
+    u64::try_from(value).map_err(|_| Error::invalid_checkpoint(path, "a dimension is too large"))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {

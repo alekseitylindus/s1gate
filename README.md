@@ -49,11 +49,22 @@ Checkpoint as it was.
 
 ### `s1gate models`
 
-List the Model Identifiers currently available to `infer`, one per line. A local Model Source is
-listed when its completed Pull record and every required file are present. `jev-latest` is listed
-when a non-empty `TypeSafe` API key is configured through `TYPESAFE_API_KEY` or
-`typesafe.api_key` in the configuration file. The command makes no network request. It prints an
-empty list when no Model Identifier is available.
+List the Model Identifiers currently available to `infer`, one per line, as the process's Model
+Router answers it (ADR-0018). A local Model Source is listed when its completed Pull record and
+every required file are present; the files are not hashed, so a listed Checkpoint can still fail to
+load. `jev-latest` is listed when a non-empty `TypeSafe` API key is configured through
+`TYPESAFE_API_KEY` or `typesafe.api_key` in the configuration file. The command makes no network
+request. It prints an empty list when no Model Identifier is available:
+
+```console
+$ s1gate models
+convaiinnovations/laya
+jev-latest
+```
+
+A configuration it cannot read — an unreadable or invalid `config.toml`, or a `TYPESAFE_API_KEY`
+that is empty — is a failure and exit code 1, as it is for every other command (ADR-0018), rather
+than an empty list.
 
 ### `s1gate verify`
 

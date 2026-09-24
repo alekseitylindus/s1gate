@@ -13,15 +13,24 @@ pub struct ModelSource {
     pub files: &'static [&'static str],
 }
 
+/// The Checkpoint files a Model Source publishes, named by the role s1gate reads them for: Pull's
+/// allowlist is these five in this order, and verification and the local Backend name the files
+/// they read from here, so a Checkpoint path has one spelling.
+pub(crate) const WEIGHTS_FILE: &str = "model.safetensors";
+pub(crate) const AGENT_CONFIG_FILE: &str = "rl_agent_config.json";
+pub(crate) const ENCODER_CONFIG_FILE: &str = "encoder/config.json";
+pub(crate) const TOKENIZER_FILE: &str = "tokenizer/tokenizer.json";
+pub(crate) const TOKENIZER_CONFIG_FILE: &str = "tokenizer/tokenizer_config.json";
+
 /// `convaiinnovations/laya` — Laya, the only Backend of the first milestone.
 pub const LAYA: ModelSource = ModelSource {
     repo: "convaiinnovations/laya",
     files: &[
-        "model.safetensors",
-        "rl_agent_config.json",
-        "encoder/config.json",
-        "tokenizer/tokenizer.json",
-        "tokenizer/tokenizer_config.json",
+        WEIGHTS_FILE,
+        AGENT_CONFIG_FILE,
+        ENCODER_CONFIG_FILE,
+        TOKENIZER_FILE,
+        TOKENIZER_CONFIG_FILE,
     ],
 };
 

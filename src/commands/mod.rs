@@ -4,7 +4,7 @@
 
 use crate::error::Result;
 use crate::model_source::{self, ModelSource};
-use crate::store::Store;
+use crate::store;
 
 pub mod infer;
 pub mod models;
@@ -16,6 +16,6 @@ pub mod verify;
 /// Model Source name, `<owner>/<name>` (ADR-0011), and the name is validated before the
 /// environment is consulted, so an invalid name stays a usage error on a host with no Model Store.
 pub fn checkpoint_name(name: &str) -> Result<&'static ModelSource> {
-    Store::at("").checkpoint_dir(name)?;
+    store::valid_name(name)?;
     model_source::lookup(name)
 }

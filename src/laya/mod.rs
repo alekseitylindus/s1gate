@@ -13,10 +13,9 @@ use serde_json::Value;
 use tokenizers::Tokenizer;
 
 use crate::call::Call;
-use crate::checkpoint;
 use crate::error::{Error, Result};
-use crate::model_source::ModelSource;
-use crate::store::Store;
+use crate::model_source;
+use crate::store::Checkpoint;
 
 use config::{AgentConfig, EncoderConfig, read_agent_config, read_encoder_config, validate_config};
 use output::format_result;
@@ -32,19 +31,11 @@ pub(super) struct SpecialTokens {
     pub(super) mask_text: String,
 }
 
-/// Run one validated System One Call against a local Checkpoint.
+/// The local Backend: a Checkpoint's resources, held for repeated Calls.
 ///
-/// # Errors
-///
-/// Fails when the Model Source is not curated, when Checkpoint verification or hashing fails, when
-/// the Checkpoint configuration is missing or invalid, when the tokenizer cannot be loaded, when
-/// the prompt does not fit the token budget, or when native inference fails.
-pub fn run(store: &Store, source: &ModelSource, call: &Call) -> Result<Value> {
-    Loaded::load(store, source)?.run(call)
-}
-
-/// A Checkpoint's resources, held for repeated Calls by the HTTP server.
-pub(crate) struct Loaded {
+/// A process that judges many Calls loads it once — the HTTP server does, so weights are mapped
+/// once and every Call is judged against them.
+pub struct Loaded {
     agent: AgentConfig,
     encoder: EncoderConfig,
     tokenizer: Tokenizer,
@@ -53,20 +44,26 @@ pub(crate) struct Loaded {
 }
 
 impl Loaded {
-    pub(crate) fn load(store: &Store, source: &ModelSource) -> Result<Self> {
-        let directory = store.checkpoint_dir(source.repo)?;
-        checkpoint::verify(store, source)?;
-        let agent = read_agent_config(&directory.join("rl_agent_config.json"))?;
-        let encoder = read_encoder_config(&directory.join("encoder/config.json"))?;
+    /// Load the resources of `checkpoint`: its configuration, tokenizer, special tokens and
+    /// weights, once the Checkpoint has verified against its own Provenance.
+    ///
+    /// # Errors
+    ///
+    /// Whatever verification fails with; [`Error::InvalidCheckpoint`] when a configuration the
+    /// Backend reads is missing or invalid; and [`Error::Inference`] when a configuration cannot be
+    /// parsed, the tokenizer cannot be loaded, or the weights cannot be mapped.
+    pub fn load(checkpoint: &Checkpoint) -> Result<Self> {
+        let directory = checkpoint.directory();
+        checkpoint.verify()?;
+        let agent = read_agent_config(&directory.join(model_source::AGENT_CONFIG_FILE))?;
+        let encoder = read_encoder_config(&directory.join(model_source::ENCODER_CONFIG_FILE))?;
         validate_config(&encoder, &agent)?;
-        let tokenizer =
-            Tokenizer::from_file(directory.join("tokenizer/tokenizer.json")).map_err(|error| {
-                Error::Inference {
-                    message: format!("loading tokenizer: {error}"),
-                }
+        let tokenizer = Tokenizer::from_file(directory.join(model_source::TOKENIZER_FILE))
+            .map_err(|error| Error::Inference {
+                message: format!("loading tokenizer: {error}"),
             })?;
-        let special = special_tokens(&directory, &tokenizer)?;
-        let weights = load_weights(&directory.join("model.safetensors"))?;
+        let special = special_tokens(directory, &tokenizer)?;
+        let weights = load_weights(&directory.join(model_source::WEIGHTS_FILE))?;
         Ok(Self {
             agent,
             encoder,
@@ -76,7 +73,14 @@ impl Loaded {
         })
     }
 
-    pub(crate) fn run(&self, call: &Call) -> Result<Value> {
+    /// Judge one validated System One Call against this Backend's resources, and answer in the
+    /// public response shape: one Answer per Question, under the id the caller chose.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Inference`] when the prompt does not fit the token budget, when the model output
+    /// does not match the Question batch, or when native inference fails.
+    pub fn run(&self, call: &Call) -> Result<Value> {
         let prepared = prepare(call, &self.tokenizer, &self.special, &self.agent)?;
         let Forward { logits, .. } = forward(
             &self.encoder,

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::model_source::{self, ModelSource};
-use crate::provenance::{Algorithm, FileRecord, Provenance, PublishedChecksum};
+use crate::provenance::{FileRecord, Provenance};
 use crate::store::{PART_SUFFIX, Store};
 
 pub mod hub;
@@ -189,7 +189,7 @@ fn stream_file(
         });
     }
     if let Some(published) = remote.published() {
-        verify(published, &digest, path)?;
+        published.check(&digest, path)?;
     }
 
     std::fs::rename(&partial, &target).map_err(|error| Error::io("rename", &target, error))?;
@@ -199,25 +199,4 @@ fn stream_file(
         sha256: digest.sha256(),
         published: remote.published().cloned(),
     })
-}
-
-/// Check the streamed bytes against the checksum the Model Source publishes. A git blob digest
-/// cannot be computed when the Model Source announced no size, and then there is nothing to check.
-fn verify(published: &PublishedChecksum, digest: &Digest, path: &str) -> Result<()> {
-    let actual = match published.algorithm {
-        Algorithm::Sha256 => digest.sha256(),
-        Algorithm::GitBlobSha1 => match digest.git_blob_sha1() {
-            Some(actual) => actual,
-            None => return Ok(()),
-        },
-    };
-    if actual.eq_ignore_ascii_case(&published.checksum) {
-        Ok(())
-    } else {
-        Err(Error::ChecksumMismatch {
-            path: path.to_string(),
-            expected: published.checksum.clone(),
-            actual,
-        })
-    }
 }

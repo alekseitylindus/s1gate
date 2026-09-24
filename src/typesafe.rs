@@ -12,6 +12,10 @@ use crate::error::{Error, Result};
 use crate::router::{Judged, Models, Refusal};
 
 pub(crate) const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+
+/// The remote Model Identifier s1gate lists, and accepts, without asking `TypeSafe` for its model
+/// list: the alias `TypeSafe` serves for its most recent stable release (ADR-0016, ADR-0018).
+pub(crate) const ALIAS: &str = "jev-latest";
 const MAX_ATTEMPTS: usize = 3;
 
 /// Judge `call` through `TypeSafe` and return what it answered.

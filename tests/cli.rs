@@ -137,6 +137,78 @@ fn help_describes_pull() {
 }
 
 #[test]
+fn models_lists_the_stored_checkpoint_and_the_alias_the_key_configures() {
+    let data_home = TempDir::new("cli-models");
+    let config_home = TempDir::new("cli-models-config");
+    fixture::write(&checkpoint_root(&data_home), fixture::header());
+
+    let without_key = models(&data_home, &config_home, None);
+    assert_eq!(without_key.code, 0);
+    assert_eq!(without_key.stdout, "convaiinnovations/laya\n");
+
+    let with_key = models(&data_home, &config_home, Some("test-key"));
+    assert_eq!(with_key.code, 0);
+    assert_eq!(
+        with_key.stdout, "convaiinnovations/laya\njev-latest\n",
+        "the alias follows the local Backend"
+    );
+}
+
+#[test]
+fn models_without_a_store_location_lists_only_the_configured_alias() {
+    let config_home = TempDir::new("cli-models-no-store");
+    let output = Command::new(binary())
+        .arg("models")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("HOME")
+        .env("TYPESAFE_API_KEY", "test-key")
+        .output()
+        .expect("the s1gate binary runs");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "jev-latest\n");
+}
+
+#[test]
+fn models_fails_when_the_configuration_cannot_be_read() {
+    let data_home = TempDir::new("cli-models-broken");
+    let config_home = TempDir::new("cli-models-broken-config");
+    let config_dir = config_home.path().join("s1gate");
+    fs::create_dir_all(&config_dir).expect("the configuration directory");
+    fs::write(config_dir.join("config.toml"), "[typesafe\napi_key = ").expect("a broken config");
+    fixture::write(&checkpoint_root(&data_home), fixture::header());
+
+    let run = models(&data_home, &config_home, None);
+
+    assert_eq!(
+        run.code, 1,
+        "a configuration that cannot be read is a runtime error, not an empty list"
+    );
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("is not valid TOML"), "{}", run.stderr);
+}
+
+/// `s1gate models` against a temporary Model Store, with `key` as the configured credential.
+fn models(data_home: &TempDir, config_home: &TempDir, key: Option<&str>) -> Run {
+    let mut command = Command::new(binary());
+    command
+        .arg("models")
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env_remove("TYPESAFE_API_KEY");
+    if let Some(key) = key {
+        command.env("TYPESAFE_API_KEY", key);
+    }
+    let output = command.output().expect("the s1gate binary runs");
+    Run {
+        code: output.status.code().expect("the binary exits"),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[test]
 fn an_empty_model_store_verifies_silently() {
     let run = run(&["verify"]);
 

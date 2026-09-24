@@ -11,7 +11,6 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
-use super::invalid;
 use super::manifest::{Dtype, Manifest};
 
 #[derive(Debug, Deserialize)]
@@ -39,46 +38,46 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
     let mut file = File::open(path).map_err(|error| Error::io("open", path, error))?;
     let mut size = [0u8; 8];
     file.read_exact(&mut size)
-        .map_err(|error| invalid(path, format!("cannot read header length: {error}")))?;
+        .map_err(|error| Error::invalid_checkpoint(path, format!("cannot read header length: {error}")))?;
     let header_len = u64::from_le_bytes(size);
     // The file may have been replaced since it was measured, so a length below the prefix leaves
     // no header and no data rather than subtracting past zero.
     let available = length.saturating_sub(8);
     if header_len > available {
-        return Err(invalid(
+        return Err(Error::invalid_checkpoint(
             path,
             format!("header is {header_len} bytes, but only {available} are available"),
         ));
     }
     let data_len = available - header_len;
     let header_len_usize =
-        usize::try_from(header_len).map_err(|_| invalid(path, "header is too large"))?;
+        usize::try_from(header_len).map_err(|_| Error::invalid_checkpoint(path, "header is too large"))?;
     let mut bytes = vec![0u8; header_len_usize];
     file.read_exact(&mut bytes)
-        .map_err(|error| invalid(path, format!("cannot read header: {error}")))?;
+        .map_err(|error| Error::invalid_checkpoint(path, format!("cannot read header: {error}")))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(path, format!("header is not JSON: {error}")))?;
+        .map_err(|error| Error::invalid_checkpoint(path, format!("header is not JSON: {error}")))?;
     let object = value
         .as_object()
-        .ok_or_else(|| invalid(path, "header is not an object"))?;
+        .ok_or_else(|| Error::invalid_checkpoint(path, "header is not an object"))?;
     let mut entries = BTreeMap::new();
     for (name, value) in object {
         if name == "__metadata__" {
             if !value.is_object() {
-                return Err(invalid(path, "__metadata__ is not an object"));
+                return Err(Error::invalid_checkpoint(path, "__metadata__ is not an object"));
             }
             continue;
         }
         let entry: HeaderEntry = HeaderEntry::deserialize(value)
-            .map_err(|error| invalid(path, format!("parameter `{name}` is invalid: {error}")))?;
+            .map_err(|error| Error::invalid_checkpoint(path, format!("parameter `{name}` is invalid: {error}")))?;
         if entry.data_offsets[0] > entry.data_offsets[1] || entry.data_offsets[1] > data_len {
-            return Err(invalid(
+            return Err(Error::invalid_checkpoint(
                 path,
                 format!("parameter `{name}` has invalid data offsets"),
             ));
         }
         let dtype = entry.dtype.parse::<Dtype>().map_err(|_| {
-            invalid(
+            Error::invalid_checkpoint(
                 path,
                 format!(
                     "parameter `{name}` uses an unsupported dtype `{}`",
@@ -91,9 +90,9 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
             .iter()
             .try_fold(1u64, |elements, size| elements.checked_mul(*size))
             .and_then(|elements| elements.checked_mul(dtype.bytes()))
-            .ok_or_else(|| invalid(path, format!("parameter `{name}` shape is too large")))?;
+            .ok_or_else(|| Error::invalid_checkpoint(path, format!("parameter `{name}` shape is too large")))?;
         if entry.data_offsets[1] - entry.data_offsets[0] != expected_bytes {
-            return Err(invalid(
+            return Err(Error::invalid_checkpoint(
                 path,
                 format!("parameter `{name}` data length does not match its dtype and shape"),
             ));
@@ -115,7 +114,7 @@ pub(super) fn verify(path: &Path, manifest: &Manifest) -> Result<()> {
     ranges.sort_by_key(|range| range.0);
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 {
-            return Err(invalid(
+            return Err(Error::invalid_checkpoint(
                 path,
                 format!("parameters `{}` and `{}` overlap", pair[0].2, pair[1].2),
             ));

@@ -4,6 +4,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::digest::Digest;
+use crate::error::{Error, Result};
+
 /// The digest a Model Source publishes for a file. It says which hash the recorded value is, so a
 /// reader can recompute it from the stored bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +25,36 @@ pub struct PublishedChecksum {
     pub algorithm: Algorithm,
     /// The checksum itself, as that hash's hexadecimal text.
     pub checksum: String,
+}
+
+impl PublishedChecksum {
+    /// Check the bytes hashed into `digest`, naming `path` if they disagree with what the Model
+    /// Source published for it.
+    ///
+    /// A git blob object id can be recomputed only from a digest whose size was known before the
+    /// first byte was hashed, so a Model Source that announced no size leaves that file checked by
+    /// its size and its recorded sha256 alone (ADR-0010).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ChecksumMismatch`] when the recomputed digest is not this checksum.
+    pub fn check(&self, digest: &Digest, path: &str) -> Result<()> {
+        let actual = match self.algorithm {
+            Algorithm::Sha256 => digest.sha256(),
+            Algorithm::GitBlobSha1 => match digest.git_blob_sha1() {
+                Some(actual) => actual,
+                None => return Ok(()),
+            },
+        };
+        if actual.eq_ignore_ascii_case(&self.checksum) {
+            return Ok(());
+        }
+        Err(Error::ChecksumMismatch {
+            path: path.to_string(),
+            expected: self.checksum.clone(),
+            actual,
+        })
+    }
 }
 
 /// One file of a Checkpoint.

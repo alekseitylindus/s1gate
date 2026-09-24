@@ -56,7 +56,9 @@ _Avoid_: Model Source when the identifier does not name a local source
 **Available Model Identifier**:
 A Model Identifier whose local Checkpoint has a completed Pull record and all required files, or
 whose remote Backend has a non-empty configured API key. Availability does not guarantee that
-inference will succeed.
+inference will succeed. The process's Model Router answers it, from the Pull record and the presence
+of the required files rather than from their contents, and a configuration it cannot read is a
+failure rather than an absence.
 _Avoid_: installed model, verified model
 
 **Resolved Model Identifier**:

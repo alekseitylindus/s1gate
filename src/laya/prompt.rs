@@ -59,7 +59,7 @@ pub(super) struct Prepared {
 }
 
 pub(super) fn special_tokens(directory: &Path, tokenizer: &Tokenizer) -> Result<SpecialTokens> {
-    let config: Value = read_json(&directory.join("tokenizer/tokenizer_config.json"))?;
+    let config: Value = read_json(&directory.join(crate::model_source::TOKENIZER_CONFIG_FILE))?;
     let token = |name: &str| -> Result<(String, u32)> {
         let value = config.get(name).ok_or_else(|| Error::Inference {
             message: format!("tokenizer config is missing {name}"),

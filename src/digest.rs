@@ -54,13 +54,8 @@ impl Digest {
     }
 
     /// The number of bytes hashed so far.
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.len
-    }
-
-    /// Whether no byte has been hashed yet.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// The sha256 of the bytes hashed so far, lowercase hexadecimal.
@@ -127,7 +122,6 @@ mod tests {
     #[test]
     fn the_sha256_of_nothing_is_known() {
         let digest = Digest::new(None);
-        assert!(digest.is_empty());
         assert_eq!(
             digest.sha256(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

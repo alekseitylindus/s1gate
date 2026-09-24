@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::call::Call;
 use crate::error::{Error, Result};
 use crate::laya::Loaded;
-use crate::model_source;
+use crate::model_source::{self, ModelSource};
 use crate::store::Store;
 
 /// What the Model Router resolved one System One Call to.
@@ -27,6 +27,18 @@ pub enum Models {
     List(Vec<Value>),
     /// The remote Backend refused the model-list request, in `TypeSafe`'s own terms.
     Refusal(Refusal),
+}
+
+/// One Model Identifier this process can judge a System One Call with, and the entry a model list
+/// publishes for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Available {
+    /// The Model Identifier a caller sends as `model`.
+    pub identifier: String,
+    /// The entry a model list publishes for it: a local Backend describes itself, and a remote one
+    /// carries what `TypeSafe` sent. `None` for an identifier that is available by configuration
+    /// alone, which no model list has described.
+    pub listing: Option<Value>,
 }
 
 /// The remote Backend's final refusal of a request, as `TypeSafe` answered it.
@@ -50,6 +62,9 @@ pub struct ModelRouter {
     env_api_key: Option<OsString>,
     xdg_config_home: Option<PathBuf>,
     home: Option<PathBuf>,
+    /// The Model Store this process resolves local Checkpoints from. `None` when the environment
+    /// names no location: a remote Call still judges, and a local one says so.
+    store: Option<Store>,
     local: Local,
 }
 
@@ -63,8 +78,62 @@ enum Local {
 }
 
 impl ModelRouter {
-    /// The Model Identifiers available to a System One Call: the local Backends the server loaded,
-    /// followed by the models `TypeSafe` currently serves when a credential is configured.
+    /// The Model Identifiers this process can judge a System One Call with, without reaching the
+    /// network: the local Checkpoints it can load, followed by the remote alias when a `TypeSafe`
+    /// credential is configured.
+    ///
+    /// Availability is decided from the Pull record and the presence of the Checkpoint's files,
+    /// never by hashing them, so an available Checkpoint can still fail to load (ADR-0018).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TypeSafe` runtime error when the configured credential is unusable, and
+    /// [`Error::InvalidCheckpoint`] or [`Error::Io`] when the Model Store cannot be read. A process
+    /// with no credential configured is not a failure: its local identifiers stand alone.
+    pub fn available(&self) -> Result<Vec<Available>> {
+        let mut available = self.local_available()?;
+        if matches!(self.typesafe_credential()?, Credential::Key(_)) {
+            available.push(Available {
+                identifier: crate::typesafe::ALIAS.to_string(),
+                listing: None,
+            });
+        }
+        Ok(available)
+    }
+
+    /// The local Model Identifiers this process can judge a Call with: the Checkpoints the server
+    /// loaded at startup, or, in a process that resolves its Checkpoint per Call, the stored
+    /// Checkpoints the Model Store holds complete. A process the environment gives no Model Store
+    /// location has none.
+    fn local_available(&self) -> Result<Vec<Available>> {
+        match &self.local {
+            // A Checkpoint that arrived after startup is not available to the server: a Call naming
+            // it fails rather than reloading weights.
+            Local::Loaded(loaded) => Ok(loaded
+                .as_ref()
+                .map(|_| local_entry(&model_source::LAYA))
+                .into_iter()
+                .collect()),
+            Local::FromStore => {
+                let Some(store) = &self.store else {
+                    return Ok(Vec::new());
+                };
+                let mut available = Vec::new();
+                for source in model_source::SOURCES {
+                    let Some(checkpoint) = store.checkpoint(source)? else {
+                        continue;
+                    };
+                    if checkpoint.files_present()? {
+                        available.push(local_entry(source));
+                    }
+                }
+                Ok(available)
+            }
+        }
+    }
+
+    /// The Model Identifiers a model list publishes: the local Backends' own entries, followed by
+    /// the models `TypeSafe` currently serves when a credential is configured (ADR-0016).
     ///
     /// # Errors
     ///
@@ -72,7 +141,11 @@ impl ModelRouter {
     /// `TypeSafe` cannot be reached, and when it answers with anything but its documented model
     /// list. A process with no configured credential is not a failure: its local list stands alone.
     pub fn models(&self) -> Result<Models> {
-        let mut models = self.local_models();
+        let mut models: Vec<Value> = self
+            .local_available()?
+            .into_iter()
+            .filter_map(|available| available.listing)
+            .collect();
         let Credential::Key(settings) = self.typesafe_credential()? else {
             return Ok(Models::List(models));
         };
@@ -86,20 +159,6 @@ impl ModelRouter {
         }
     }
 
-    /// The local Backends loaded when the HTTP server started, described as `TypeSafe` describes a
-    /// model. A server that loaded no Checkpoint lists none.
-    fn local_models(&self) -> Vec<Value> {
-        if matches!(self.local, Local::Loaded(Some(_))) {
-            vec![json!({
-                "name": model_source::LAYA.repo,
-                "description": "Laya, a local Backend for choice, score, and noul Questions.",
-                "release_date": "2026-09-18"
-            })]
-        } else {
-            Vec::new()
-        }
-    }
-
     /// The `TypeSafe` credential this process's configuration provides.
     fn typesafe_credential(&self) -> Result<Credential> {
         typesafe_credential(
@@ -110,25 +169,31 @@ impl ModelRouter {
         )
     }
 
-    /// Use the process configuration for the Model Store and `TypeSafe` Backend.
+    /// Use the process configuration for the Model Store and `TypeSafe` Backend. A process the
+    /// environment gives no Model Store location still judges remote Calls.
     pub fn from_env() -> Self {
+        Self::from_env_with(Store::from_env().ok())
+    }
+
+    /// The process configuration, over `store` as the Model Store.
+    fn from_env_with(store: Option<Store>) -> Self {
         Self::with_settings(
             crate::typesafe::ENDPOINT,
             std::env::var_os("TYPESAFE_API_KEY"),
             std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
             std::env::var_os("HOME").map(PathBuf::from),
+            store,
         )
     }
 
     /// Load present local Checkpoints once for the HTTP server.
     pub(crate) fn for_server() -> Result<Self> {
         let store = Store::from_env()?;
-        let local = if store.provenance(model_source::LAYA.repo)?.is_some() {
-            Some(Box::new(Mutex::new(Loaded::load(&store, &model_source::LAYA)?)))
-        } else {
-            None
+        let local = match store.checkpoint(&model_source::LAYA)? {
+            Some(checkpoint) => Some(Box::new(Mutex::new(Loaded::load(&checkpoint)?))),
+            None => None,
         };
-        let mut router = Self::from_env();
+        let mut router = Self::from_env_with(Some(store));
         router.local = Local::Loaded(local);
         Ok(router)
     }
@@ -138,12 +203,14 @@ impl ModelRouter {
         env_api_key: Option<OsString>,
         xdg_config_home: Option<PathBuf>,
         home: Option<PathBuf>,
+        store: Option<Store>,
     ) -> Self {
         Self {
             endpoint: endpoint.to_string(),
             env_api_key,
             xdg_config_home,
             home,
+            store,
             local: Local::FromStore,
         }
     }
@@ -176,13 +243,11 @@ impl ModelRouter {
         let source = model_source::lookup_identifier(&call.model)?;
         match &self.local {
             Local::FromStore => {
-                let store = Store::from_env()?;
-                if store.provenance(source.repo)?.is_none() {
-                    return Err(Error::MissingCheckpoint {
-                        name: source.repo.to_string(),
-                    });
-                }
-                crate::laya::run(&store, source, &call).map(Judged::Answer)
+                let store = self.store.as_ref().ok_or(Error::NoStoreRoot)?;
+                let checkpoint = store
+                    .checkpoint(source)?
+                    .ok_or_else(|| Error::missing_checkpoint(source.repo))?;
+                Loaded::load(&checkpoint)?.run(&call).map(Judged::Answer)
             }
             // One Call at a time: a Call that panicked must not stop every later local Call.
             Local::Loaded(Some(loaded)) => loaded
@@ -190,10 +255,21 @@ impl ModelRouter {
                 .unwrap_or_else(PoisonError::into_inner)
                 .run(&call)
                 .map(Judged::Answer),
-            Local::Loaded(None) => Err(Error::MissingCheckpoint {
-                name: source.repo.to_string(),
-            }),
+            Local::Loaded(None) => Err(Error::missing_checkpoint(source.repo)),
         }
+    }
+}
+
+/// The entry a model list publishes for the local Backend of `source`: what the Backend judges and
+/// the date its Checkpoint was published (ADR-0016).
+fn local_entry(source: &ModelSource) -> Available {
+    Available {
+        identifier: source.repo.to_string(),
+        listing: Some(json!({
+            "name": source.repo,
+            "description": "Laya, a local Backend for choice, score, and noul Questions.",
+            "release_date": "2026-09-18"
+        })),
     }
 }
 
@@ -259,9 +335,7 @@ fn typesafe_credential(
             },
             // A file that is not there is no credential configured, which only a caller that needs
             // one reports. A file that is there but unreadable is this process's defect.
-            Err(error)
-                if env_api_key.is_none() && error.kind() == std::io::ErrorKind::NotFound =>
-            {
+            Err(error) if env_api_key.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Credential::Missing {
                     message: format!(
                         "cannot read {} ({error}); set TYPESAFE_API_KEY or add typesafe.api_key to this file",
@@ -334,12 +408,115 @@ mod tests {
     use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::thread;
 
-    use super::{ModelRouter, Models};
+    use super::{Error, ModelRouter, Models};
+    use crate::model_source::{self, ModelSource};
+    use crate::store::Store;
 
     /// What `TypeSafe` answers a model-list request with.
     const MODELS: &str = r#"{"models":[{"name":"jev-latest","description":"The most recent stable release.","release_date":"2025-11-04"}]}"#;
+
+    /// An endpoint nothing listens on: the tests below that never ask `TypeSafe` anything send no
+    /// request to it.
+    const ENDPOINT: &str = "http://127.0.0.1:1/v1/systemone";
+
+    #[test]
+    fn availability_is_the_complete_checkpoint_and_the_configured_alias() {
+        let root = temp_dir("availability");
+        let store = Store::at(&root);
+        let source = &model_source::LAYA;
+        let available = |key: Option<&str>| {
+            ModelRouter::with_settings(
+                ENDPOINT,
+                key.map(OsString::from),
+                None,
+                None,
+                Some(store.clone()),
+            )
+            .available()
+            .expect("the process configuration is usable")
+        };
+
+        // A store that records nothing holds no Checkpoint, and no key is configured: a list of
+        // Model Identifiers with nothing in it is the answer, not a failure.
+        assert!(available(None).is_empty());
+
+        store.record_provenance(source.repo, &provenance()).unwrap();
+        assert!(
+            available(None).is_empty(),
+            "a Checkpoint whose files are not there is not available"
+        );
+
+        write_files(&root, source);
+        let listed = available(None);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].identifier, source.repo);
+        assert_eq!(
+            listed[0]
+                .listing
+                .as_ref()
+                .expect("the local Backend's entry")["name"],
+            source.repo
+        );
+
+        // A configured key adds the remote alias, which no model list has described yet.
+        assert_eq!(
+            available(Some("test-key"))
+                .into_iter()
+                .map(|available| available.identifier)
+                .collect::<Vec<_>>(),
+            vec![source.repo.to_string(), "jev-latest".to_string()]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_be_read_fails_availability() {
+        for (key, diagnostic) in [
+            ("", "TYPESAFE_API_KEY is empty"),
+            ("  ", "TYPESAFE_API_KEY is empty"),
+        ] {
+            let router =
+                ModelRouter::with_settings(ENDPOINT, Some(OsString::from(key)), None, None, None);
+
+            let error = router
+                .available()
+                .expect_err("a key that cannot be used is a failure");
+
+            assert!(matches!(error, Error::TypeSafe { .. }), "{error:?}");
+            assert!(error.to_string().contains(diagnostic), "{error}");
+        }
+    }
+
+    /// A Model Store holding a Checkpoint of `source` whose files are in place: availability asks
+    /// whether they are there, not what they hold.
+    fn write_files(root: &std::path::Path, source: &ModelSource) {
+        for path in source.files {
+            let file = root.join(source.repo).join(path);
+            std::fs::create_dir_all(file.parent().expect("a file has a directory")).unwrap();
+            std::fs::write(&file, b"x").unwrap();
+        }
+    }
+
+    fn provenance() -> crate::provenance::Provenance {
+        crate::provenance::Provenance {
+            source: model_source::LAYA.repo.to_string(),
+            requested_revision: None,
+            resolved_revision: "1c5edc17a7acd8701df6fc341c0d179f1c62c982".to_string(),
+            files: Vec::new(),
+        }
+    }
+
+    fn temp_dir(case: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("s1gate-router-{case}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
 
     #[test]
     fn an_environment_key_lists_remote_models_without_a_configuration_file() {
@@ -370,6 +547,7 @@ mod tests {
         let router = ModelRouter::with_settings(
             &endpoint,
             Some(OsString::from("test-key")),
+            None,
             None,
             None,
         );
